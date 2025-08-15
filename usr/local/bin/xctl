@@ -1,0 +1,23 @@
+#!/bin/bash
+set -euo pipefail
+cmd="${1:-}"; shift || true
+VT="${XDG_VTNR:-1}"
+
+start() {
+  pgrep -x Xorg >/dev/null && { echo "running"; return; }
+  xinit /usr/bin/true -- :0 vt${VT} -keeptty
+}
+stop() {
+  pkill -TERM -x Xorg 2>/dev/null || true
+  for _ in {1..30}; do pgrep -x Xorg >/dev/null || break; sleep 0.1; done
+  pgrep -x Xorg >/dev/null && pkill -KILL -x Xorg || true
+}
+status() { pgrep -x Xorg >/dev/null && echo "running" || echo "stopped"; }
+
+case "$cmd" in
+  start) start ;;
+  stop) stop  ;;
+  restart) stop; start ;;
+  status) status ;;
+  *) echo "usage: xctl {start|stop|restart|status}"; exit 2 ;;
+esac

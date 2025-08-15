@@ -1,0 +1,27 @@
+#!/bin/bash
+set -euo pipefail
+
+cmd="${1:-}"; shift || true
+URL="${1:-https://www.google.com}"
+
+# If ES is running under X, stop it so we never double-spawn ES later
+ES_WAS_RUNNING=0
+if pgrep -f '[e]mulationstation' >/dev/null; then
+  echo "EmulationStation is running, will stop it first" >> ~/kiosk.log
+  ES_WAS_RUNNING=1
+  esctl stop
+fi
+
+case "$cmd" in
+  -chrome)  /usr/local/bin/chromiumctl start "${URL}";;
+  -gallery) /usr/local/bin/galleryctl  start "${URL}";;
+  -video) /usr/local/bin/videoctl start "${URL}";;
+  -iptv) /usr/local/bin/iptvctl start "${URL}";;
+  -music) /usr/local/bin/musicctl start "${URL}";;
+  -radio) /usr/local/bin/radioctl start "${URL}";;
+  -screensaver) /usr/local/bin/screensaverctl start;;
+  *) echo "usage: kioskShell {-chrome|-gallery} {PATH|URL}";;
+esac
+
+# when app exits, restart ES if it was running
+[[ "${ES_WAS_RUNNING}" = "1" ]] && esctl start || true

@@ -1,0 +1,65 @@
+#!/bin/bash
+set -euo pipefail
+
+[[ "${RADIOCTL_DEBUG:-0}" = "1" ]] && { exec > >(tee -a /tmp/radioctl.log) 2>&1; set -x; }
+
+CMD="${1:-}"; shift || true
+LOCK=/tmp/kiosk-radio.lock
+
+is_running(){ pgrep -x mpv >/dev/null; }
+
+VIS="${RADIO_VIS:-showspectrum=s=1280x720:mode=combined:color=rainbow:scale=log}"
+MPV_BASE=(
+  --fs --hwdec=auto-safe --osd-level=1
+  --keep-open=no --idle=no --loop=no
+  --force-window=yes --audio-display=no
+  --input-default-bindings=yes --input-vo-keyboard=yes --input-cursor=yes
+  --cache=yes --cache-secs=5
+  --no-config
+)
+
+# first non-comment URL from a playlist
+first_http_url() {
+  awk 'BEGIN{RS="\r?\n"} /^[[:space:]]*#/ {next} NF {print; exit}' -- "$1" | tr -d "\r"
+}
+
+start(){
+  target="${1:-}"
+  [[ -n "${DISPLAY:-}" ]] || { echo "radioctl: needs X"; exit 1; }
+  command -v mpv >/dev/null || { echo "radioctl: mpv not found"; exit 1; }
+  [[ -n "$target" ]] || { echo "radioctl: need .m3u/.pls/.strm or URL"; exit 2; }
+
+  exec 9>"$LOCK"; flock -n 9 || { pkill -x mpv 2>/dev/null || true; sleep 0.2; flock -w 2 9 || exit 1; }
+
+  /usr/local/bin/joypadctl start >/dev/null 2>&1 || true
+  pkill -x mpv 2>/dev/null || true
+
+  SRC="$target"
+  if [[ -f "$target" ]]; then
+    url="$(first_http_url "$target" || true)"
+    [[ -n "$url" ]] && SRC="$url"
+  fi
+
+  VIS_OPT=(--lavfi-complex="[aid1]asplit=2[ao][a];[a]${VIS}[vo]")
+  # Try reconnect flags if available
+  RECONN=()
+  if mpv --list-options | grep -qx reconnect-streams; then
+    RECONN+=(--reconnect-streams=yes)
+  elif mpv --list-options | grep -qx stream-lavf-o; then
+    RECONN+=(--stream-lavf-o=reconnect_streamed=1,reconnect_on_network_error=1)
+  fi
+
+  exec mpv "${MPV_BASE[@]}" "${VIS_OPT[@]}" "${RECONN[@]}" \
+     "$SRC" ${RADIO_LOG:+--log-file=/tmp/mpv-radio.log --msg-level=all=v}
+}
+
+stop(){ pkill -x mpv 2>/dev/null || true; /usr/local/bin/joypadctl stop >/dev/null 2>&1 || true; }
+status(){ is_running && echo running || echo stopped; }
+
+case "${CMD}" in
+  start) start "$@" ;;
+  stop) stop ;;
+  restart) stop; start "$@" ;;
+  status) status ;;
+  *) echo "usage: radioctl {start FILE|URL|stop|restart|status}"; exit 2 ;;
+esac

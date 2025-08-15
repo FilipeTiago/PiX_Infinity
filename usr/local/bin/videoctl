@@ -1,0 +1,111 @@
+#!/bin/bash
+set -euo pipefail
+
+# Enable debug logs: DEBUG=1 videoctl start <path>
+if [[ "${DEBUG:-0}" = "1" ]]; then
+  exec > >(tee -a /tmp/videoctl.log) 2>&1
+  set -x
+fi
+
+# Consistent UTF-8 handling
+export LANG=${LANG:-en_GB.UTF-8}
+export LC_ALL=${LC_ALL:-en_GB.UTF-8}
+
+CMD="${1:-}"; shift || true
+LOCK=/tmp/kiosk-video.lock
+
+is_running(){ pgrep -x mpv --input-default-bindings=yes --input-vo-keyboard=yes --input-cursor=yes --input-default-bindings=yes --input-vo-keyboard=yes --input-cursor=yes --input-default-bindings=yes --input-vo-keyboard=yes --input-cursor=yes >/dev/null; }
+
+build_playlist() {
+  local dir="$1" out="$2"
+  local depth=()
+  [[ "${RECURSIVE:-0}" = "1" ]] || depth=(-maxdepth 1)
+  mapfile -d '' files < <(
+    find -L "$dir" "${depth[@]}" -type f \
+      \( -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.avi' \
+         -o -iname '*.webm' -o -iname '*.m4v' -o -iname '*.ts' -o -iname '*.flv' \) \
+      -print0 | sort -z
+  )
+  printf '%s\n' "${files[@]}" > "$out"
+}
+
+start(){
+  local target="${1:-.}"
+  [[ -z "${DISPLAY:-}" ]] && { echo "videoctl: needs X (DISPLAY unset)"; exit 1; }
+  command -v mpv --input-default-bindings=yes --input-vo-keyboard=yes --input-cursor=yes --input-default-bindings=yes --input-vo-keyboard=yes --input-cursor=yes --input-default-bindings=yes --input-vo-keyboard=yes --input-cursor=yes >/dev/null || { echo "videoctl: mpv --input-default-bindings=yes --input-vo-keyboard=yes --input-cursor=yes --input-default-bindings=yes --input-vo-keyboard=yes --input-cursor=yes --input-default-bindings=yes --input-vo-keyboard=yes --input-cursor=yes not found"; exit 1; }
+
+  # If target doesn't exist but contains '\ ', try unescaping spaces
+  if [[ ! -e "$target" ]]; then
+    case "$target" in
+      *\\\ *) 
+        local unesc="${target//\\ / }"
+        [[ -e "$unesc" ]] && target="$unesc"
+        ;;
+    esac
+  fi
+
+  # Derive DIR/SEL robustly: if it's a dir, no selection; otherwise start at the file
+  local dir sel
+  if [[ -d "$target" ]]; then
+    dir="$target"
+    sel=""
+  else
+    dir="$(dirname -- "$target")"
+    sel="$target"
+  fi
+
+  # single-instance lock
+  exec 9>"$LOCK"
+  if ! flock -n 9; then
+    pkill -x mpv --input-default-bindings=yes --input-vo-keyboard=yes --input-cursor=yes --input-default-bindings=yes --input-vo-keyboard=yes --input-cursor=yes --input-default-bindings=yes --input-vo-keyboard=yes --input-cursor=yes 2>/dev/null || true
+    sleep 0.3
+    flock -w 2 9 || { echo "videoctl: busy"; exit 1; }
+  fi
+
+  /usr/local/bin/joypadctl start >/dev/null 2>&1 || true
+  pkill -x mpv --input-default-bindings=yes --input-vo-keyboard=yes --input-cursor=yes --input-default-bindings=yes --input-vo-keyboard=yes --input-cursor=yes --input-default-bindings=yes --input-vo-keyboard=yes --input-cursor=yes 2>/dev/null || true
+
+  # Build playlist
+  local rundir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  IPC="${XDG_RUNTIME_DIR:-$RUNDIR}/mpv --input-default-bindings=yes --input-vo-keyboard=yes --input-cursor=yes-video.sock"
+  mkdir -p "$rundir"
+  local pl="$rundir/kiosk-playlist.$(date +%s%N).m3u"
+  build_playlist "$dir" "$pl"
+
+  if [[ ! -s "$pl" ]]; then
+    echo "videoctl: no playable videos in: $dir"
+    sleep 2
+    exit 1
+  fi
+
+  # Compute index of selected (if any)
+  local idx=0
+  if [[ -n "$sel" ]]; then
+    local n
+    n=$(awk -v sel="$sel" 'BEGIN{ret=-1} {if($0==sel){ret=NR-1; exit}} END{print ret}' "$pl")
+    [[ "$n" -ge 0 ]] && idx="$n"
+  fi
+
+  # Run mpv --input-default-bindings=yes --input-vo-keyboard=yes --input-cursor=yes --input-default-bindings=yes --input-vo-keyboard=yes --input-cursor=yes --input-default-bindings=yes --input-vo-keyboard=yes --input-cursor=yes full-screen; continue through playlist; quit at end
+  exec mpv --input-ipc-server="$IPC" --input-default-bindings=yes --input-vo-keyboard=yes --input-cursor=yes --input-default-bindings=yes --input-vo-keyboard=yes --input-cursor=yes --input-default-bindings=yes --input-vo-keyboard=yes --input-cursor=yes --fs --hwdec=auto-safe --osd-level=1 \
+           --playlist="$pl" --playlist-start="$idx" \
+           --loop=no --keep-open=no --save-position-on-quit --resume-playback=yes --idle=no --input-ipc-server="$IPC" \
+           ${MPV_EXTRAS:+$MPV_EXTRAS} \
+           $( [[ "${DEBUG:-0}" = "1" ]] && echo --log-file=/tmp/mpv --input-default-bindings=yes --input-vo-keyboard=yes --input-cursor=yes --input-default-bindings=yes --input-vo-keyboard=yes --input-cursor=yes --input-default-bindings=yes --input-vo-keyboard=yes --input-cursor=yes-videoctl.log --msg-level=all=v )
+}
+
+stop(){
+  printf '{"command":["quit"]}\n' | socat - "UNIX-CONNECT:$IPC" 2>/dev/null || true
+  pkill -x mpv --input-default-bindings=yes --input-vo-keyboard=yes --input-cursor=yes --input-default-bindings=yes --input-vo-keyboard=yes --input-cursor=yes --input-default-bindings=yes --input-vo-keyboard=yes --input-cursor=yes 2>/dev/null || true
+  /usr/local/bin/joypadctl stop >/dev/null 2>&1 || true
+}
+
+status(){ is_running && echo "running" || echo "stopped"; }
+
+case "${CMD}" in
+  start)   start "$@" ;;
+  stop)    stop ;;
+  restart) stop; start "$@" ;;
+  status)  status ;;
+  *) echo "usage: videoctl {start PATH|stop|restart PATH|status}"; exit 2 ;;
+esac

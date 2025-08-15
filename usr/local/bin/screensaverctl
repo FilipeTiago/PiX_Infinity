@@ -1,0 +1,104 @@
+#!/bin/bash
+set -euo pipefail
+
+CMD="${1:-start}"; shift || true
+LOCK=/tmp/kiosk-screensaver.lock
+PROFILE_DIR="$HOME/.config/chromium-saver"
+CHROME="$(command -v chromium-browser || command -v chromium || echo /usr/bin/chromium-browser)"
+
+pick_url() {
+  local list="$HOME/.config/screensaver/yt.txt"
+  [[ -s "$list" ]] || { echo "https://www.youtube.com/watch?v=jfKfPfyJRdk"; return; }
+  mapfile -t L <"$list"
+  local raw="${L[ RANDOM % ${#L[@]} ]}"
+
+  # playlist? (look for list=XYZ and trim at next &/?/space)
+  if [[ "$raw" == *"list="* ]]; then
+    local pid="${raw#*list=}"; pid="${pid%%[&? ]*}"
+    if [[ -n "$pid" ]]; then
+      echo "https://www.youtube.com/embed/videoseries?list=${pid}&autoplay=1&mute=1&controls=0&loop=1&modestbranding=1&rel=0&disablekb=1"
+      return
+    fi
+  fi
+
+  # Extract a video id:
+  local vid=""
+  if [[ "$raw" == http* ]]; then
+    # try watch?v=ID
+    if [[ "$raw" == *"v="* ]]; then
+      vid="${raw#*v=}"; vid="${vid%%[&? ]*}"
+    fi
+    # try youtu.be/ID
+    if [[ -z "$vid" && "$raw" == https://youtu.be/* ]]; then
+      vid="${raw##https://youtu.be/}"; vid="${vid%%[&? ]*}"
+    fi
+  else
+    # maybe it's already an 11-char id
+    if [[ ${#raw} -eq 11 && "$raw" == [[:alnum:]_-]* ]]; then
+      vid="$raw"
+    fi
+  fi
+
+  if [[ -n "$vid" ]]; then
+    echo "https://www.youtube.com/embed/${vid}?autoplay=1&mute=1&controls=0&loop=1&playlist=${vid}&modestbranding=1&fs=1&rel=0&disablekb=1"
+  else
+    # unknown line; open as-is
+    echo "$raw"
+  fi
+}
+
+pick_size() {
+  W="${W:-1920}"; H="${H:-1080}"
+  if command -v xrandr >/dev/null 2>&1; then
+    for _ in {1..30}; do xrandr 2>/dev/null | grep -q ' connected' && break; sleep 0.2; done
+    local line dims
+    line="$(xrandr 2>/dev/null | awk '/ connected primary/{print; exit}')"
+    [[ -z "$line" ]] && line="$(xrandr 2>/dev/null | awk '/ connected/ && $2=="connected"{print; exit}')"
+    if [[ -n "$line" ]]; then
+      dims="$(awk '{for(i=1;i<=NF;i++) if ($i ~ /^[0-9]+x[0-9]+(\+|$)/){print $i; exit}}' <<<"$line")"
+      dims="${dims%%+*}"
+      if [[ "$dims" =~ ^([0-9]+)x([0-9]+)$ ]]; then W="${BASH_REMATCH[1]}"; H="${BASH_REMATCH[2]}"; fi
+    fi
+  fi
+  if [[ "${KIOSK_FORCE_720:-0}" = "1" ]]; then W=1280; H=720; fi
+  export W H
+}
+
+
+start(){
+  [[ -n "${DISPLAY:-}" ]] || { echo "screensaverctl: needs X"; exit 1; }
+  command -v "$CHROME" >/dev/null || { echo "chromium not found"; exit 1; }
+  mkdir -p "$PROFILE_DIR"
+
+  exec 9>"$LOCK"
+  if ! flock -n 9; then
+    pkill -f 'chromium.*--user-data-dir=.*chromium-saver' 2>/dev/null || true
+    sleep 0.2
+    flock -w 2 9 || { echo "screensaverctl: busy"; exit 1; }
+  fi
+
+  /usr/local/bin/joypadctl start >/dev/null 2>&1 || true
+
+  URL="$(pick_url)"
+  pick_size
+
+  exec "$CHROME" \
+    --user-data-dir="$PROFILE_DIR" --profile-directory=Default --password-store=basic \
+    --no-first-run --no-default-browser-check \
+    --kiosk --start-fullscreen \
+    --window-position=0,0 --window-size="${W},${H}" \
+    --autoplay-policy=no-user-gesture-required \
+    --disable-translate --disable-features=TranslateUI \
+    "$URL"
+}
+
+stop(){ pkill -f 'chromium.*--user-data-dir=.*chromium-saver' 2>/dev/null || true; /usr/local/bin/joypadctl stop >/dev/null 2>&1 || true; }
+status(){ pgrep -f 'chromium.*--user-data-dir=.*chromium-saver' >/dev/null && echo running || echo stopped; }
+
+case "${CMD}" in
+  start) start ;;
+  stop) stop ;;
+  restart) stop; start ;;
+  status) status ;;
+  *) echo "usage: screensaverctl {start|stop|restart|status}"; exit 2 ;;
+esac

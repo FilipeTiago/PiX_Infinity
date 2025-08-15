@@ -1,0 +1,55 @@
+#!/bin/bash
+
+export DISPLAY=:0
+export XAUTHORITY=/home/infinity/.Xauthority
+echo "$(date) kiosk-quit user: $(whoami)" >> /tmp/kiosk-quit.log
+logger "kiosk-quit fired by $(whoami)"
+
+# env for X
+export DISPLAY=:0
+export XAUTHORITY=/home/infinity/.Xauthority
+
+echo "$(date) kiosk-quit user: $(whoami)" >> /tmp/kiosk-quit.log
+logger "kiosk-quit fired by $(whoami)"
+
+export DISPLAY=:0; export XAUTHORITY=/home/infinity/.Xauthority; logger "kiosk-quit fired by $(whoami)"; echo "$(date) kiosk-quit user: $(whoami)" >> /tmp/kiosk-quit.log
+#!/bin/bash
+set -euo pipefail
+
+export DISPLAY=:0
+export XAUTHORITY=/home/infinity/.Xauthority
+logger "kiosk-quit fired by $(whoami)"
+echo "$(date) kiosk-quit user: $(whoami)" >> /tmp/kiosk-quit.log
+
+
+# Log for quick debugging
+{
+  echo "[$(date +%F\ %T)] kiosk-quit start (uid=$(id -u))"
+
+  uid="$(id -u)"
+  RUNDIR="${XDG_RUNTIME_DIR:-/run/user/$uid}"
+
+  # 1) Politely quit any mpv via IPC (video + iptv sockets)
+  for s in "$RUNDIR/mpv-video.sock" "$RUNDIR/mpv-iptv.sock"; do
+    if [ -S "$s" ]; then
+      echo "mpv IPC: sending quit to $s"
+      printf '{"command":["quit"]}\n' | socat - "UNIX-CONNECT:$s" 2>/dev/null || true
+    fi
+  done
+
+  # 2) Ask our controllers to stop (idempotent)
+  for ctl in videoctl iptvctl galleryctl chromiumctl screensaverctl; do
+    if command -v "/usr/local/bin/$ctl" >/dev/null 2>&1; then
+      echo "calling $ctl stop"
+      "/usr/local/bin/$ctl" stop >/dev/null 2>&1 || true
+    fi
+  done
+
+  # 3) Fallback kills (in case anything is still around)
+  pkill -x mpv 2>/dev/null || true
+  pkill -x feh 2>/dev/null || true
+  pkill -x chromium 2>/dev/null || true
+  pkill -x chromium-browser 2>/dev/null || true
+
+  echo "[$(date +%F\ %T)] kiosk-quit done"
+} >> /tmp/kiosk-quit.log 2>&1

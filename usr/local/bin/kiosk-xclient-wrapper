@@ -1,0 +1,18 @@
+#!/bin/bash
+# usage: kiosk-xclient-wrapper <username> <client> [args...]
+set -euo pipefail
+USER_NAME="${1:?}"; shift
+UIDN="$(id -u "$USER_NAME")"
+
+# X sets DISPLAY before launching this wrapper — preserve it
+export DISPLAY="${DISPLAY:-:0}"
+export HOME="/home/${USER_NAME}"
+export USER="${USER_NAME}"
+export LOGNAME="${USER_NAME}"
+export XDG_RUNTIME_DIR="/run/user/${UIDN}"
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/bin"
+
+# Run client as the user (no password prompt)
+exec runuser -u "${USER_NAME}" -- env \
+  HOME="$HOME" USER="$USER" LOGNAME="$LOGNAME" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" DISPLAY="$DISPLAY" \
+  "$@"
