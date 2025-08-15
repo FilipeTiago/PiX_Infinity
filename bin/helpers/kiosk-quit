@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 export DISPLAY=:0
 export XAUTHORITY=/home/infinity/.Xauthority
@@ -13,7 +13,7 @@ echo "$(date) kiosk-quit user: $(whoami)" >> /tmp/kiosk-quit.log
 logger "kiosk-quit fired by $(whoami)"
 
 export DISPLAY=:0; export XAUTHORITY=/home/infinity/.Xauthority; logger "kiosk-quit fired by $(whoami)"; echo "$(date) kiosk-quit user: $(whoami)" >> /tmp/kiosk-quit.log
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 export DISPLAY=:0

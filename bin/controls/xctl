@@ -1,4 +1,10 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+LOG_NAME="xctl"; . /usr/local/bin/system/common.sh
+
+require_cmd Xorg
+
 set -euo pipefail
 cmd="${1:-}"; shift || true
 VT="${XDG_VTNR:-1}"

@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+LOG_NAME="videoctl"; . /usr/local/bin/system/common.sh
+
+APP="mpv"
+CLASS="${CLASS:-KioskVideo}"                    # X11 name + window title
+LOCKNAME="kiosk-video"
+PATTERN="$APP.*--x11-name=${CLASS}.*--title=${CLASS}"
+
+require_cmd mpv
+
+start() {
+  local src="${1:-}"   # file/URL; allow empty and let mpv show "nothing" if desired
+  lock_or_exit "$LOCKNAME"
+  audio_prepare
+  pick_size; export W H
+
+  # Conservative defaults for Pi + Xorg; tweak if you want hwdec.
+  ARGS=(
+    --profile=sw-fast
+    --vo=gpu --gpu-context=x11
+    --hwdec=auto-safe
+    --fullscreen
+    --no-border
+    --cursor-autohide=yes
+    --x11-name="$CLASS" --title="$CLASS"
+    --geometry="${W}x${H}+0+0"
+    --keep-open=no
+    --force-window=yes
+  )
+  [[ "${VIDEOCTL_DEBUG:-0}" = "1" ]] && ARGS+=(--msg-level=all=v --v=2)
+
+  log "exec mpv (${W}x${H}) src='${src:-<none>}'"
+  if [[ -n "${src:-}" ]]; then
+    exec mpv "${ARGS[@]}" -- "${src}"
+  else
+    exec mpv "${ARGS[@]}"
+  fi
+}
+
+stop()   { pkill_pat "$PATTERN"; }
+status() { if pgrep_pat "$PATTERN"; then echo "running"; else echo "stopped"; fi; }
+restart(){ stop; wait_for 1; start "${1:-}"; }
+
+case "${1:-}" in
+  start)   shift; start "$@";;
+  stop)    stop;;
+  status)  status;;
+  restart) shift; restart "$@";;
+  *) echo "usage: ${0##*/} {start|stop|status|restart} [FILE|URL]"; exit 2;;
+esac

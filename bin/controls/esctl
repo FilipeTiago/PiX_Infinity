@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+LOG_NAME="esctl"; . /usr/local/bin/system/common.sh
+
+ES_VT="${ES_VT:-1}"
+# What we consider “EmulationStation”
+ES_PAT='(^|/)(emulationstation|emulationstation-standalone|emulationstation-de)(\.bin)?([[:space:]]|$)'
+
+unit_exists_user()   { systemctl --user list-unit-files | awk '{print $1}' | grep -qx "$1"; }
+unit_exists_system() { systemctl       list-unit-files | awk '{print $1}' | grep -qx "$1"; }
+
+_try_start_systemd() {
+  local units=(
+    "${ES_UNIT:-emulationstation.service}"
+    "emulationstation@tty${ES_VT}.service"
+    "retropie.service"
+  )
+  for u in "${units[@]}"; do
+    if unit_exists_user "$u";   then log "systemd --user start $u";   systemctl --user start "$u"   && return 0; fi
+    if unit_exists_system "$u"; then log "systemd (root) start $u";   sudo -n systemctl start "$u"  && return 0; fi
+  done
+  return 1
+}
+
+start() {
+  if pgrep -f "$ES_PAT" >/dev/null; then log "ES already running"; return 0; fi
+  if _try_start_systemd; then return 0; fi
+
+  # Fallback: spawn directly on VT (best effort)
+  local bin
+  for cand in emulationstation emulationstation-standalone emulationstation-de; do
+    if bin="$(command -v "$cand" 2>/dev/null)"; then break; fi
+  done
+  [[ -n "${bin:-}" ]] || die "emulationstation binary not found and no systemd unit available"
+
+  log "openvt -> ${bin} on vt${ES_VT}"
+  sudo -n openvt -sw -c "$ES_VT" -- /bin/bash -lc "unset DISPLAY; exec '${bin}'" || true
+}
+
+stop() {
+  if ! pgrep -f "$ES_PAT" >/dev/null; then log "ES not running"; return 0; fi
+  log "stopping EmulationStation"
+  pkill -TERM -f "$ES_PAT" || true
+  for _ in {1..30}; do pgrep -f "$ES_PAT" >/dev/null || return 0; sleep 0.2; done
+  log "force kill EmulationStation"
+  pkill -KILL -f "$ES_PAT" || true
+}
+
+status() { pgrep -f "$ES_PAT" >/dev/null && echo "running" || echo "stopped"; }
+restart(){ stop; wait_for 1; start; }
+
+case "${1:-}" in
+  start|stop|status|restart) "$@";;
+  *) echo "usage: ${0##*/} {start|stop|status|restart}"; exit 2;;
+esac

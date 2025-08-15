@@ -1,5 +1,10 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
+IFS=$'\n\t'
+LOG_NAME="pwcctl"; . /usr/local/bin/system/common.sh
+
+require_cmd pipewire
+
 cmd="${1:-status}"
 
 case "$cmd" in

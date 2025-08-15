@@ -1,5 +1,7 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
 # usage: kiosk-xclient-wrapper <username> <client> [args...]
+
 set -euo pipefail
 USER_NAME="${1:?}"; shift
 UIDN="$(id -u "$USER_NAME")"

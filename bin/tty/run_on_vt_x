@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # usage: run_on_vt_x <VT> <client> [args...]
 set -euo pipefail
 
@@ -7,7 +7,7 @@ shift
 
 # Map VT→display; vt7→:1, vt8→:2, etc. Override with KIOSK_XNUM if you like.
 XNUM="${KIOSK_XNUM:-$(( VT >= 7 ? VT-6 : 1 ))}"
-BACKVT="${KIOSK_BACK_VT:-1}"
+BACKVT="${KIOSK_BACK_VT:-1}   
 
 LOGDIR="$HOME/.local/share/xorg"
 RLOG="/tmp/run_on_vt_x.log"

@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+LOG_NAME="joypadctl"; . /usr/local/bin/system/common.sh
+
+require_cmd antimicrox
+
+# Find a profile (override with JOYPAD_PROFILE)
+PROFILE=""
+_candidates=(
+  "${JOYPAD_PROFILE:-}"
+  "${XDG_CONFIG_HOME:-$HOME/.config}/antimicrox/kiosk.amgp"
+  "$HOME/.config/antimicrox/kiosk.amgp"
+  "/usr/local/share/pix/profiles/kiosk.amgp"
+  "/opt/pix/profiles/kiosk.amgp"
+)
+for p in "${_candidates[@]}"; do
+  [[ -n "$p" && -f "$p" ]] && PROFILE="$p" && break
+done
+
+PATTERN='(^|/)antimicrox([[:space:]]|$)'
+
+start() {
+  # Needs X to map keys
+  if [[ -z "${DISPLAY:-}" ]]; then log "DISPLAY not set; not starting antimicrox"; return 0; fi
+  if pgrep -f "$PATTERN" >/dev/null; then log "antimicrox already running"; return 0; fi
+  [[ -n "$PROFILE" ]] || die "no AntimicroX profile found (set JOYPAD_PROFILE=/path/file.amgp)"
+
+  log "launch antimicrox with profile: $PROFILE"
+  nohup antimicrox --profile "$PROFILE" --hidden --tray >/dev/null 2>&1 & disown || true
+}
+
+stop() {
+  if ! pgrep -f "$PATTERN" >/dev/null; then log "antimicrox not running"; return 0; fi
+  log "stopping antimicrox"
+  pkill -TERM -f "$PATTERN" || true
+  for _ in {1..20}; do pgrep -f "$PATTERN" >/dev/null || return 0; sleep 0.2; done
+  pkill -KILL -f "$PATTERN" || true
+}
+
+status(){ pgrep -f "$PATTERN" >/dev/null && echo "running" || echo "stopped"; }
+restart(){ stop; wait_for 1; start; }
+
+case "${1:-}" in
+  start|stop|status|restart) "$@";;
+  *) echo "usage: ${0##*/} {start|stop|status|restart}   (override profile with JOYPAD_PROFILE=...)"; exit 2;;
+esac

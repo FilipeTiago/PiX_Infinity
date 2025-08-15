@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+LOG_NAME="radioctl"; . /usr/local/bin/system/common.sh
+
+APP="mpv"
+CLASS="${CLASS:-KioskRadio}"
+LOCKNAME="kiosk-radio"
+PATTERN="$APP.*--x11-name=${CLASS}.*--title=${CLASS}"
+
+require_cmd mpv
+VISUALIZER="${VISUALIZER:-0}"
+
+start() {
+  local url="${1:-}"
+  [[ -n "$url" ]] || die "radioctl: need stream URL"
+  lock_or_exit "$LOCKNAME"
+  audio_prepare
+  pick_size; export W H
+
+  if [[ "$VISUALIZER" = "1" ]]; then
+    ARGS=(
+      --no-video --force-window=yes
+      --vo=gpu --gpu-context=x11 --hwdec=no
+      --x11-name="$CLASS" --title="$CLASS" --geometry="${W}x${H}+0+0"
+      --osc=yes
+      --lavfi-complex='[aid1]showwaves=s=${W}x${H}:mode=line:colors=white[vv];[vv]format=yuv420p[vo]'
+      --audio-display=yes
+      --cache=yes --cache-secs=10
+    )
+  else
+    ARGS=( --no-video --force-window=no --audio-display=no --cache=yes --cache-secs=10 )
+  fi
+
+  [[ "${RADIOCTL_DEBUG:-0}" = "1" ]] && ARGS+=(--msg-level=all=v --v=2)
+
+  log "exec mpv RADIO vis=${VISUALIZER} url='${url}'"
+  exec mpv "${ARGS[@]}" -- "$url"
+}
+
+stop()   { pkill_pat "$PATTERN"; }
+status() { if pgrep_pat "$PATTERN"; then echo "running"; else echo "stopped"; fi; }
+restart(){ stop; wait_for 1; start "${1:-}"; }
+
+case "${1:-}" in
+  start)   shift; start "$@";;
+  stop)    stop;;
+  status)  status;;
+  restart) shift; restart "$@";;
+  *) echo "usage: ${0##*/} {start|stop|status|restart} <URL>    (set VISUALIZER=1 for a visualizer)"; exit 2;;
+esac

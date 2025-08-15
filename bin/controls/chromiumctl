@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Control script for Chromium in kiosk mode
+
+set -euo pipefail
+IFS=$'\n\t'
+LOG_NAME="chromiumctl"; . /usr/local/bin/system/common.sh
+
+CLASS="${CLASS:-KioskChromium}"
+PROFILE_DIR="${PROFILE_DIR:-$HOME/.config/chromium-kiosk}"
+CHROME="$(command -v chromium-browser || command -v chromium || true)"
+[[ -n "$CHROME" ]] || die "Chromium not found"
+
+PATTERN="chromium.*--class=${CLASS}.*--user-data-dir=${PROFILE_DIR}"
+
+build_ext_flags() {
+  local list=()
+  [[ -d /opt/chrome-extensions/ubol-lite        ]] && list+=(/opt/chrome-extensions/ubol-lite)
+  [[ -d /opt/chrome-extensions/yt-fixes         ]] && list+=(/opt/chrome-extensions/yt-fixes)
+  [[ -d /opt/chrome-extensions/youtube-nonstop  ]] && list+=(/opt/chrome-extensions/youtube-nonstop)
+  (( ${#list[@]} )) || { echo ""; return; }
+  local csv; IFS=, read -r -a _ <<<"$(printf ,%s "${list[@]}")"; csv="${_*:1}"
+  echo "--disable-extensions-except=${csv} --load-extension=${csv}"
+}
+
+start() {
+  local url="${1:-about:blank}"
+  lock_or_exit "kiosk-chromium"
+  audio_prepare
+  pick_size; export W H
+  mkdir -p "$PROFILE_DIR"; chmod 700 "$PROFILE_DIR"
+  rm -f "$PROFILE_DIR"/Singleton{Lock,Cookie,Socket,Deadlock} || true
+
+  # Safer defaults for Pi + Xorg
+  EXTRA=(
+    --kiosk 
+    --start-fullscreen
+    --window-position=0,0
+    --window-size="${W},${H}"
+    --autoplay-policy=no-user-gesture-required
+    --no-sandbox
+    --no-first-run 
+    --no-default-browser-check 
+    --test-type
+    --disable-gpu 
+    --disable-gpu-compositing 
+    --in-process-gpu
+    --use-gl=swiftshader 
+    --ozone-platform=x11
+    --ignore-gpu-blocklist
+    --disable-features=VaapiVideoDecodeAccelerator,VaapiVideoDecoder,ChromeWhatsNewUI,WelcomeUI
+    --class="$CLASS"
+    --user-data-dir="$PROFILE_DIR"
+    --profile-directory=Default
+    --password-store=basic
+  )
+  [[ "${CHROMIUMCTL_DEBUG:-0}" = "1" ]] && EXTRA+=(--enable-logging=stderr --v=1)
+
+  local EXT_FLAGS; EXT_FLAGS="$(build_ext_flags || true)"
+
+  log "exec Chromium (${W}x${H}) url=${url}"
+  exec "$CHROME" ${EXT_FLAGS:-} "${EXTRA[@]}" "$url"
+}
+
+stop()   { pkill_pat "$PATTERN"; }
+status() { if pgrep_pat "$PATTERN"; then echo "running"; else echo "stopped"; fi; }
+restart(){ stop; wait_for 1; start "${1:-about:blank}"; }
+
+case "${1:-}" in
+  start)   shift; start "$@";;
+  stop)    stop;;
+  status)  status;;
+  restart) shift; restart "$@";;
+  *) echo "usage: ${0##*/} {start|stop|status|restart} [URL]"; exit 2;;
+esac
+

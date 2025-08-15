@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
+LOG_NAME="iptvctl"; . /usr/local/bin/system/common.sh
+
+APP="mpv"
+CLASS="${CLASS:-KioskIPTV}"
+LOCKNAME="kiosk-iptv"
+PATTERN="$APP.*--x11-name=${CLASS}.*--title=${CLASS}"
+
+require_cmd mpv
+
+start() {
+  local url="${1:-}"
+  [[ -n "$url" ]] || die "iptvctl: need a stream URL"
+  lock_or_exit "$LOCKNAME"
+  audio_prepare
+  pick_size; export W H
+
+  ARGS=(
+    --vo=gpu --gpu-context=x11
+    --hwdec=auto-safe
+    --fullscreen --no-border --cursor-autohide=yes
+    --x11-name="$CLASS" --title="$CLASS" --geometry="${W}x${H}+0+0"
+    # Stream/latency tuning:
+    --profile=low-latency
+    --demuxer-max-bytes=50M
+    --demuxer-readahead-secs=8
+    --cache=yes --cache-secs=10
+    --force-window=yes
+  )
+  [[ "${IPTVCTL_DEBUG:-0}" = "1" ]] && ARGS+=(--msg-level=all=v --v=2)
+
+  log "exec mpv IPTV (${W}x${H}) url='${url}'"
+  exec mpv "${ARGS[@]}" -- "$url"
+}
+
+stop()   { pkill_pat "$PATTERN"; }
+status() { if pgrep_pat "$PATTERN"; then echo "running"; else echo "stopped"; fi; }
+restart(){ stop; wait_for 1; start "${1:-}"; }
+
+case "${1:-}" in
+  start)   shift; start "$@";;
+  stop)    stop;;
+  status)  status;;
+  restart) shift; restart "$@";;
+  *) echo "usage: ${0##*/} {start|stop|status|restart} <URL>"; exit 2;;
+esac
