@@ -78,7 +78,7 @@ build_ext_flags() {
   if (( ${#present[@]} )); then
     local csv
     csv=$(IFS=, ; echo "${present[*]}")
-    echo "--disable-extensions-except=$csv --load-extension=$csv"
+    echo "--disable-extensions-except=${csv} --load-extension=${csv}"
   fi
 }
 
