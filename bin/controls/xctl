@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
+# Xorg control script for PiX Infinity
+
 set -euo pipefail
 IFS=$'\n\t'
 LOG_NAME="xctl"; . /usr/local/bin/system/common.sh
+
+# Try relative (repo/dev install), then fall back to canonical install path.
+# shellcheck source=/dev/null
+if ! source "$(dirname "${BASH_SOURCE[0]}")/system/paths" 2>/dev/null; then
+  source "/opt/pix-infinity/bin/system/paths"
+fi
 
 require_cmd Xorg
 

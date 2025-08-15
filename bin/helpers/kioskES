@@ -5,6 +5,12 @@ ARG="${1:-}"
 
 [[ -z "${XDG_VTNR:-}" ]] && { echo "kioskES: run from local console/ES"; exit 1; }
 
+# Try relative (repo/dev install), then fall back to canonical install path.
+# shellcheck source=/dev/null
+if ! source "$(dirname "${BASH_SOURCE[0]}")/system/paths" 2>/dev/null; then
+  source "/opt/pix-infinity/bin/system/paths"
+fi
+
 VT_CHROME="${KIOSK_VT_CHROME:-8}"
 VT_GALLERY="${KIOSK_VT_GALLERY:-9}"
 VT_VIDEO="${KIOSK_VT_VIDEO:-10}"

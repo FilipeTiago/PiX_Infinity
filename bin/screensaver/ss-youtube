@@ -1,6 +1,11 @@
-sudo tee /usr/local/bin/ss-youtube >/dev/null <<'SH'
 #!/bin/bash
 set -euo pipefail
+
+# Try relative (repo/dev install), then fall back to canonical install path.
+# shellcheck source=/dev/null
+if ! source "$(dirname "${BASH_SOURCE[0]}")/system/paths" 2>/dev/null; then
+  source "/opt/pix-infinity/bin/system/paths"
+fi
 
 # --- settings ---
 CFG="${HOME}/videos.cfg"
@@ -97,5 +102,3 @@ wait_for_idle
 play_one
 maybe_poweroff_display
 exit 0
-SH
-sudo chmod +x /usr/local/bin/ss-youtube

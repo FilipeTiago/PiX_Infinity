@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
+# EmulationStation control script
+
 set -euo pipefail
 IFS=$'\n\t'
 LOG_NAME="esctl"; . /usr/local/bin/system/common.sh
+
+# Try relative (repo/dev install), then fall back to canonical install path.
+# shellcheck source=/dev/null
+if ! source "$(dirname "${BASH_SOURCE[0]}")/system/paths" 2>/dev/null; then
+  source "/opt/pix-infinity/bin/system/paths"
+fi
 
 ES_VT="${ES_VT:-1}"
 # What we consider “EmulationStation”
