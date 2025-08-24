@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# Rebuild ~/.emulationstation/es_systems.cfg from ~/.emulationstation/modules/*.xml
+# - Resolves [ROM-FOLDER] using ~/.emulationstation/rom-location.txt (first existing)
+# - Skips systems that still contain [ROM-FOLDER] after resolution
+# - Always rewrites es_systems.cfg from scratch (backup kept)
+
+set -Eeuo pipefail
+
+USER_HOME="${HOME}"
+ES_DIR="$USER_HOME/.emulationstation"
+MOD_DIR="$ES_DIR/modules"
+ROM_LOC_FILE="$ES_DIR/rom-location.txt"
+ES_CFG="$ES_DIR/es_systems.cfg"
+
+die(){ echo "[pix-mod] $*" >&2; exit 1; }
+need(){ command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"; }
+
+need awk
+[ -d "$MOD_DIR" ] || die "modules dir not found: $MOD_DIR"
+
+# Determine ROM base from rom-location.txt (first existing dir)
+ROM_BASE=""
+if [ -f "$ROM_LOC_FILE" ]; then
+  while IFS= read -r line; do
+    # trim
+    base="$(printf '%s' "$line" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+    [ -z "$base" ] && continue
+    # expand ~
+    case "$base" in "~/"*) base="$USER_HOME/${base#~/}";; "~") base="$USER_HOME";; esac
+    if [ -d "$base" ]; then ROM_BASE="$base"; break; fi
+  done < "$ROM_LOC_FILE"
+fi
+# Fallback: ~/RetroPie/roms if present
+if [ -z "$ROM_BASE" ] && [ -d "$USER_HOME/RetroPie/roms" ]; then
+  ROM_BASE="$USER_HOME/RetroPie/roms"
+fi
+
+[ -z "$ROM_BASE" ] && echo "[pix-mod] WARN: no ROM base found; modules requiring [ROM-FOLDER] will be skipped."
+
+TMP="$(mktemp)"
+BK="$ES_CFG.bak.$(date +%s)"
+mkdir -p "$ES_DIR"
+
+# Begin file
+{
+  echo '<?xml version="1.0"?>'
+  echo '<systemList>'
+} > "$TMP"
+
+added=0
+skipped=0
+
+# Process each module xml (sorted)
+while IFS= read -r -d '' f; do
+  name="$(basename "$f")"
+
+  # Read content
+  content="$(cat "$f")"
+
+  # Resolve [ROM-FOLDER] if present
+  if printf '%s' "$content" | grep -q '\[ROM-FOLDER\]'; then
+    if [ -n "$ROM_BASE" ]; then
+      content="${content//\[ROM-FOLDER\]/$ROM_BASE}"
+    else
+      echo "[pix-mod] skip: $name (no ROM_BASE for [ROM-FOLDER])"
+      skipped=$((skipped+1))
+      continue
+    fi
+  fi
+
+  # If still contains placeholder, skip to avoid breaking ES
+  if printf '%s' "$content" | grep -q '\[ROM-FOLDER\]'; then
+    echo "[pix-mod] skip: $name (unresolved [ROM-FOLDER])"
+    skipped=$((skipped+1))
+    continue
+  fi
+
+  # Optionally sanity-check that it contains a <system> block
+  if ! printf '%s' "$content" | grep -q '<system>'; then
+    echo "[pix-mod] skip: $name (no <system> tag)"
+    skipped=$((skipped+1))
+    continue
+  fi
+
+  # Append with a blank line separator
+  echo "$content" >> "$TMP"
+  echo >> "$TMP"
+  added=$((added+1))
+  # Show a compact summary line
+  sysname="$(printf '%s' "$content" | awk -F'[<>]' '/<name>/{print $3; exit}')"
+  echo "[pix-mod] + $sysname  ←  $name"
+done < <(find "$MOD_DIR" -maxdepth 1 -type f -name '*.xml' -print0 | sort -z)
+
+# Close file
+echo '</systemList>' >> "$TMP"
+
+# Backup & swap
+if [ -f "$ES_CFG" ]; then cp -f "$ES_CFG" "$BK"; echo "[pix-mod] backup: $BK"; fi
+mv -f "$TMP" "$ES_CFG"
+chmod 644 "$ES_CFG"
+
+echo "[pix-mod] wrote: $ES_CFG  (systems added: $added, skipped: $skipped)"

@@ -1,8 +1,0 @@
-#!/usr/bin/env bash
-if [ -f /tmp/kiosk.lock ]; then
-	rm /tmp/kiosk.lock
-fi
-
-if [ -f /tmp/kiosk-chromium.lock ]; then
-	rm /tmp/kiosk-*.lock
-fi

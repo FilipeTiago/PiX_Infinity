@@ -1,0 +1,9 @@
+<system>
+  <name>music</name>
+  <fullname>Music</fullname>
+  <path>[ROM-FOLDER]/music</path>
+  <extension>.mp3 .flac .m4a .aac .ogg .opus .wav .wma .aif .aiff</extension>
+  <command>/usr/local/bin/pix_vt_switch 8 /bin/bash -lc '/usr/local/bin/pix_mpv_music "%ROM%"'</command>
+  <platform>mpv</platform>
+  <theme>music</theme>
+</system>

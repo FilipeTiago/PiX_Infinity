@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+import sys, os, json, time, socket, subprocess, xml.etree.ElementTree as ET
+
+# usage: pix_mpv_radio_watch <socket|none> <wall.png> <romroot> <gamelist.xml> <station.m3u>
+if len(sys.argv) != 6:
+    print("usage: pix_mpv_radio_watch <socket|none> <wall.png> <romroot> <gamelist.xml> <station.m3u>", file=sys.stderr)
+    sys.exit(2)
+
+SOCK, WALL, ROMROOT, GMXML, M3U = sys.argv[1:]
+
+def parse_m3u(path):
+    title = None
+    url = None
+    try:
+        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                s = line.strip()
+                if s.startswith("#EXTINF"):
+                    # #EXTINF:-1,Title
+                    parts = s.split(",", 1)
+                    if len(parts) == 2:
+                        title = parts[1].strip()
+                elif s and not s.startswith("#"):
+                    url = s
+                    break
+    except Exception:
+        pass
+    if not title:
+        title = os.path.splitext(os.path.basename(path))[0].replace("_"," ")
+    return title, url
+
+def parse_gamelist_for_image(abs_path: str):
+    try:
+        root = ET.parse(GMXML).getroot()
+    except Exception:
+        return None
+    rel = os.path.relpath(abs_path, ROMROOT)
+    for game in root.findall(".//game"):
+        p = (game.findtext("path") or "").lstrip("./")
+        if p == rel:
+            img = game.findtext("image")
+            if img:
+                if img.startswith("/") or img.startswith("~"):
+                    return os.path.expanduser(img)
+                return os.path.join(ROMROOT, img)
+    return None
+
+def find_cover(abs_path: str):
+    # 1) gamelist <image>
+    img = parse_gamelist_for_image(abs_path)
+    if img and os.path.isfile(img): return img
+    # 2) downloaded_images/radio/<relative>.jpg or .png
+    rel = os.path.splitext(os.path.relpath(abs_path, ROMROOT))[0]
+    di  = os.path.expanduser("~/.emulationstation/downloaded_images/radio")
+    for ext in (".png",".jpg",".jpeg"):
+        p1 = os.path.join(di, rel + ext)
+        p2 = os.path.join(di, os.path.basename(rel) + ext)
+        if os.path.isfile(p1): return p1
+        if os.path.isfile(p2): return p2
+    # 3) folder cover.jpg/png alongside
+    d = os.path.dirname(abs_path)
+    for name in ("cover","folder","logo","station"):
+        for ext in (".jpg",".png",".jpeg"):
+            p = os.path.join(d, name+ext)
+            if os.path.isfile(p): return p
+    return None
+
+def convert_wall(title: str, cover: str, out: str):
+    tmp = out + ".tmp"
+    try:
+        # 1280x720 dark background
+        subprocess.run(["convert", "-size", "1280x720", "canvas:#101014", f"PNG:{tmp}"], check=True)
+        if cover and os.path.isfile(cover):
+            subprocess.run([
+                "convert", f"PNG:{tmp}",
+                "(", cover, "-resize", "540x540>", "-background", "none", "-gravity", "center", "-extent", "540x540", ")",
+                "-gravity", "West", "-geometry", "+80+0", "-composite",
+                "-gravity", "Northwest", "-fill", "white", "-pointsize", "48", "-annotate", "+660+180", title,
+                f"PNG:{tmp}"
+            ], check=True)
+        else:
+            subprocess.run([
+                "convert", f"PNG:{tmp}",
+                "-gravity", "center", "-fill", "#888", "-pointsize", "120", "-annotate", "+0-80", "📻",
+                "-gravity", "south", "-fill", "white", "-pointsize", "42", "-annotate", "+0+80", title,
+                f"PNG:{tmp}"
+            ], check=True)
+        os.replace(tmp, out)
+    except Exception:
+        try: os.remove(tmp)
+        except Exception: pass
+
+def connect(path, tries=120, delay=0.1):
+    for _ in range(tries):
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.connect(path); s.settimeout(0.25); return s
+        except Exception:
+            time.sleep(delay)
+    return None
+
+def send_cmd(sock, cmd):
+    try: sock.sendall((json.dumps({"command": cmd})+"\n").encode("utf-8"))
+    except Exception: pass
+
+def recv_lines(sock):
+    buf = b""
+    while True:
+        try:
+            chunk = sock.recv(4096)
+            if not chunk: break
+            buf += chunk
+            *lines, buf = buf.split(b"\n")
+            for ln in lines:
+                ln = ln.strip()
+                if ln:
+                    yield ln
+        except socket.timeout:
+            yield from ()
+        except Exception:
+            break
+
+def get_prop(sock, prop, timeout=0.4):
+    send_cmd(sock, ["get_property", prop])
+    t0 = time.time()
+    while time.time()-t0 < timeout:
+        for ln in recv_lines(sock):
+            try:
+                obj = json.loads(ln.decode("utf-8"))
+                if obj.get("error") == "success":
+                    return obj.get("data")
+            except Exception:
+                pass
+    return None
+
+# Initial render (no socket needed)
+base_title, _ = parse_m3u(M3U)
+convert_wall(base_title, find_cover(M3U), WALL)
+
+# one-shot mode for seeding, skip live updates
+if SOCK == "none":
+    sys.exit(0)
+
+sock = connect(SOCK)
+if not sock:
+    sys.exit(0)
+
+# Subscribe to useful props (metadata / media-title)
+for i, prop in enumerate(("metadata","media-title")):
+    send_cmd(sock, ["observe_property", i+1, prop])
+
+title = base_title
+try:
+    for ln in recv_lines(sock):
+        try: obj = json.loads(ln.decode("utf-8"))
+        except Exception: continue
+        if obj.get("event") == "property-change":
+            if obj.get("name") == "metadata":
+                md = obj.get("data") or {}
+                icy = md.get("icy-title") or md.get("StreamTitle")
+                if icy:
+                    convert_wall(f"{base_title} — {icy}", find_cover(M3U), WALL)
+            elif obj.get("name") == "media-title":
+                mt = obj.get("data")
+                if mt and mt != title:
+                    title = mt
+                    convert_wall(title, find_cover(M3U), WALL)
+        elif obj.get("event") in ("start-file","file-loaded"):
+            convert_wall(base_title, find_cover(M3U), WALL)
+except KeyboardInterrupt:
+    pass

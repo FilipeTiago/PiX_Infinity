@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Print the ROM path for a given EmulationStation system name.
+# Usage: pix_rom_location <system-name>
+set -euo pipefail
+
+CFG="${ES_CFG:-$HOME/.emulationstation/es_systems.cfg}"
+
+if [[ $# -ne 1 ]]; then
+  echo "usage: $(basename "$0") <system-name>" >&2
+  exit 2
+fi
+
+SYS="$1"
+
+if [[ ! -f "$CFG" ]]; then
+  echo "error: config not found: $CFG" >&2
+  exit 3
+fi
+
+path="$(
+  awk -v sys="$SYS" '
+    BEGIN { inblk=0; sys_ok=0 }
+    /<system[> ]/ { inblk=1; sys_ok=0; next }
+    /<\/system>/   { inblk=0; sys_ok=0; next }
+
+    inblk && /<name>/ {
+      name = $0
+      sub(/^.*<name>[[:space:]]*/, "", name)
+      sub(/[[:space:]]*<\/name>.*$/, "", name)
+      if (name == sys) sys_ok=1
+      next
+    }
+
+    inblk && sys_ok && /<path>/ {
+      p = $0
+      sub(/^.*<path>[[:space:]]*/, "", p)
+      sub(/[[:space:]]*<\/path>.*$/, "", p)
+      print p
+      exit
+    }
+  ' "$CFG"
+)"
+
+if [[ -z "${path:-}" ]]; then
+  echo "error: system '$SYS' not found or missing <path> in $CFG" >&2
+  exit 4
+fi
+
+# Trim and expand leading ~
+path="$(printf '%s' "$path" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
+path="${path/#\~/$HOME}"
+
+echo "$path"

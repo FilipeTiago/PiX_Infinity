@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Usage: pix_vt_switch <vt-number> <command> [args...]
+set -Eeuo pipefail
+need(){ command -v "$1" >/dev/null 2>&1 || { echo "[vt] missing: $1" >&2; exit 2; }; }
+need openvt; need chvt; need fgconsole; need sudo
+
+[ $# -ge 2 ] || { echo "Usage: $0 <vt> <command> [args...]"; exit 2; }
+TARGET_VT="$1"; shift
+[[ "$TARGET_VT" =~ ^[0-9]+$ ]] && [ "$TARGET_VT" -ge 1 ] && [ "$TARGET_VT" -le 63 ] || {
+  echo "[vt] invalid VT: $TARGET_VT (1..63)"; exit 2; }
+
+# original VT and invoking user
+ORIG_VT="$(fgconsole 2>/dev/null || echo 1)"
+CALLER="$(logname 2>/dev/null || printf '%s' "$USER")"
+
+_restore(){ if [ "$ORIG_VT" -ne "$TARGET_VT" ]; then sudo /usr/bin/chvt "$ORIG_VT" >/dev/null 2>&1 || true; fi; }
+trap _restore EXIT INT TERM
+
+# try without -f first; on "in use" retry with -f
+if ! sudo /usr/bin/openvt -c "$TARGET_VT" -s -w -- sudo -H -u "$CALLER" -- "$@"; then
+  echo "[vt] VT $TARGET_VT busy, retrying with -f…" >&2
+  sudo /usr/bin/openvt -f -c "$TARGET_VT" -s -w -- sudo -H -u "$CALLER" -- "$@"
+fi

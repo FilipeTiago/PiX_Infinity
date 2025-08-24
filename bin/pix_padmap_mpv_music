@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+# Gamepad -> mpv IPC controls for music
+# Usage: pix_padmap_mpv_music /tmp/mpv-music.<pid>.sock
+import sys, os, time, json, socket
+from evdev import InputDevice, list_devices, ecodes
+
+if len(sys.argv) != 2:
+    print("usage: pix_padmap_mpv_music <mpv-ipc-socket>", file=sys.stderr)
+    sys.exit(2)
+SOCK_PATH = sys.argv[1]
+
+def connect_socket(path, tries=50, delay=0.1):
+    for _ in range(tries):
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.connect(path)
+            s.setblocking(False)
+            return s
+        except Exception:
+            time.sleep(delay)
+    return None
+
+def mpv_cmd(sock, *cmd):
+    try:
+        payload = json.dumps({"command": list(cmd)}).encode('utf-8') + b'\n'
+        sock.sendall(payload)
+    except Exception:
+        pass
+
+def cap_dict(dev):
+    caps = dev.capabilities(verbose=True)
+    # normalize keys list
+    evk = caps.get(ecodes.EV_KEY, [])
+    if evk and isinstance(evk[0], tuple):
+        evk = [c for c, _ in evk]
+    return evk, caps.get(ecodes.EV_ABS, [])
+
+def score_device(dev):
+    try:
+        keys, _ = cap_dict(dev)
+        score = 0
+        for k in (ecodes.BTN_SOUTH, ecodes.BTN_EAST, ecodes.BTN_START,
+                  ecodes.BTN_SELECT, ecodes.BTN_TL, ecodes.BTN_TR):
+            if k in keys: score += 20
+        if ecodes.BTN_SOUTH in keys: score += 100
+        if 'Xbox' in (dev.name or '') or 'X-Box' in (dev.name or ''): score += 50
+        return score
+    except Exception:
+        return -1
+
+def pick_device():
+    devs = [InputDevice(p) for p in list_devices()]
+    if not devs: return None
+    devs = sorted(devs, key=score_device, reverse=True)
+    return devs[0]
+
+dev = pick_device()
+if not dev:
+    print("[pad] no input device found", file=sys.stderr)
+    sys.exit(1)
+print(f"[pad] using {dev.fn} ({dev.name})", file=sys.stderr)
+dev.grab()  # grab exclusively so ES/X don’t see repeats
+
+sock = connect_socket(SOCK_PATH)
+if not sock:
+    print("[pad] cannot connect to mpv IPC", file=sys.stderr)
+    sys.exit(1)
+print("[pad] connected to mpv IPC", file=sys.stderr)
+
+try:
+    for ev in dev.read_loop():
+        if ev.type == ecodes.EV_KEY:
+            if ev.value != 1:  # only key down
+                continue
+            if ev.code == ecodes.BTN_SOUTH:      # A → quit
+                mpv_cmd(sock, "quit")
+            elif ev.code == ecodes.BTN_EAST:     # B → toggle pause
+                mpv_cmd(sock, "cycle", "pause")
+        elif ev.type == ecodes.EV_ABS and ev.code in (ecodes.ABS_HAT0X, ecodes.ABS_HAT0Y):
+            # D-pad
+            if ev.code == ecodes.ABS_HAT0X:
+                if ev.value == 1:
+                    mpv_cmd(sock, "seek", 10, "relative")
+                elif ev.value == -1:
+                    mpv_cmd(sock, "seek", -10, "relative")
+            elif ev.code == ecodes.ABS_HAT0Y:
+                if ev.value == -1:
+                    mpv_cmd(sock, "playlist-prev")
+                elif ev.value == 1:
+                    mpv_cmd(sock, "playlist-next")
+except KeyboardInterrupt:
+    pass
+finally:
+    try: dev.ungrab()
+    except Exception: pass

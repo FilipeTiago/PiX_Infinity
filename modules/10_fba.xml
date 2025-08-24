@@ -1,0 +1,9 @@
+<system>
+  <name>fba</name>
+  <fullname>Final Burn Alpha</fullname>
+  <path>[ROM-FOLDER]/fba</path>
+  <extension>.7z .cue .fba .iso .zip .7Z .CUE .FBA .ISO .ZIP</extension>
+  <command>/opt/retropie/supplementary/runcommand/runcommand.sh 0 _SYS_ fba %ROM%</command>
+  <platform>arcade</platform>
+  <theme>fba</theme>
+</system>

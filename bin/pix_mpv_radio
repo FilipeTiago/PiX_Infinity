@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# Headless RADIO player (mpv) + FEH wallpaper + padmap A=quit
+# Usage: pix_mpv_radio "<path/to/station.m3u>"   (or a direct stream URL)
+set -Eeuo pipefail
+
+LOG="/tmp/pix_mpv_radio.$$.log"
+exec > >(stdbuf -oL tee -a "$LOG") 2>&1
+echo "=== pix_mpv_radio ENTRY $(date -Is) pid=$$ ==="
+
+need(){ command -v "$1" >/dev/null 2>&1 || { echo "[radio] missing: $1" >&2; exit 2; }; }
+need realpath; need xinit; need feh; need convert; need mpv; need awk; need sed; need grep
+
+RAW="${1:?need m3u or URL}"
+RAW="${RAW//\\ / }"
+SEL="$(realpath -m "$RAW" 2>/dev/null || echo "$RAW")"
+
+# Resolve URL + name
+URL=""; NAME=""
+if [[ -f "$SEL" ]]; then
+  NAME="$(awk -F, '/^#EXTINF:/ {n=$2} END{print n}' "$SEL" || true)"
+  URL="$(grep -vE '^\s*#' "$SEL" | sed -n '1p' | sed 's/\r$//' || true)"
+  [[ -n "$URL" ]] || { echo "[radio] no URL in $SEL"; exit 1; }
+else
+  URL="$SEL"
+fi
+if [[ -z "$NAME" ]]; then
+  if [[ -f "$SEL" ]]; then NAME="${SEL##*/}"; NAME="${NAME%.*}"
+  else NAME="$(echo "$URL" | sed -E 's#^https?://##; s#/.*##')"
+  fi
+fi
+
+# Cover via gamelist
+ROMROOT="$(pix_rom_location radio 2>/dev/null || true)"
+[[ -n "$ROMROOT" ]] || ROMROOT="$HOME/RetroPie/roms/radio"
+GMXML="$ROMROOT/gamelist.xml"
+echo "[radio] gamelist=$GMXML"
+
+resolve_img_path(){ local p="$1"; [[ -n "$p" ]] || return 1
+  case "$p" in /*|~/*) eval "printf '%s\n' \"$p\"" ;; *) printf '%s\n' "$ROMROOT/$p" ;; esac; }
+
+COVER=""
+if [[ -f "$GMXML" && -f "$SEL" ]]; then
+  rel="${SEL#$ROMROOT/}"
+  img="$(awk -v want="$rel" '
+    BEGIN{RS="</game>"; FS="\n"} {p=""; i="";
+      for (j=1;j<=NF;j++){
+        if ($j ~ /<path>/)  { s=$j; gsub(/.*<path>|<\/path>.*/,"",s); gsub(/^\.\/+/,"",s); p=s }
+        if ($j ~ /<image>/) { s=$j; gsub(/.*<image>|<\/image>.*/,"",s); i=s }
+      }
+      if (p==want){ print i; exit }
+  }' "$GMXML" || true)"
+  if [[ -n "$img" ]]; then
+    r="$(resolve_img_path "$img" || true)"; [[ -s "$r" ]] && COVER="$r"
+    echo "[radio] gamelist image='$img' -> resolved='${COVER:-none}'"
+  fi
+fi
+
+# Wallpaper
+WALL="/tmp/pix_radio_wall.now.png"
+make_wall(){ local title="$1" cover="${2:-}" out="$3" tmp="${3}.tmp"
+  /usr/bin/convert -size 1280x720 "canvas:#101014" "PNG:${tmp}" 2>>"$LOG" || true
+  if [[ -n "$cover" && -s "$cover" ]]; then
+    /usr/bin/convert "PNG:${tmp}" \
+      \( "$cover" -resize 540x540\> -background none -gravity center -extent 540x540 \) \
+      -gravity West -geometry +80+0 -composite \
+      -gravity Northwest -fill white -pointsize 48 -annotate +660+180 "$title" \
+      "PNG:${tmp}" 2>>"$LOG" || true
+  else
+    /usr/bin/convert "PNG:${tmp}" \
+      -gravity center -fill "#888" -pointsize 120 -annotate +0-80 "📻" \
+      -gravity south -fill white -pointsize 42 -annotate +0+80 "$title" \
+      "PNG:${tmp}" 2>>"$LOG" || true
+  fi
+  mv -f "$tmp" "$out" 2>/dev/null || cp -f "$tmp" "$out" 2>/dev/null || true; }
+make_wall "$NAME" "${COVER:-}" "$WALL"
+echo "[radio] wallpaper ready: $WALL"
+echo "[radio] url=$URL cover=${COVER:-none}"
+
+# Client script
+SOCK="/tmp/mpv-radio.$$.sock"
+CLIENT="/tmp/pix_mpv_radio_client.$$.sh"
+cat > "$CLIENT" <<EOF
+#!/usr/bin/env bash
+set -Eeuo pipefail
+echo "[client] DISPLAY=\$DISPLAY who=\$(id -un)" >&2
+
+WALL="$WALL"
+SOCK="$SOCK"
+URL="$URL"
+
+# --- AUDIO ENV (Pulse/PipeWire) ---
+USR_UID="\$(id -u)"
+export XDG_RUNTIME_DIR="\${XDG_RUNTIME_DIR:-/run/user/\$USR_UID}"
+if [ -S "\$XDG_RUNTIME_DIR/pulse/native" ]; then
+  export PULSE_SERVER="unix:\$XDG_RUNTIME_DIR/pulse/native"
+fi
+export JACK_NO_START_SERVER=1
+
+# Show wallpaper
+/usr/bin/feh -F -x -Z --no-menus --hide-pointer --reload 1 "\$WALL" >/dev/null 2>&1 &
+FEHPID=\$!
+
+# Gamepad (A=quit)
+/usr/local/bin/pix_padmap_mpv_music "\$SOCK" >/tmp/pix_padmap_mpv_radio.\$\$.log 2>&1 &
+PADPID=\$!
+
+# Play stream
+exec /usr/bin/mpv --no-config \
+  --no-video --audio-display=no --force-window=no \
+  --no-terminal --osc=no --osd-level=0 \
+  --ao=pulse \
+  --input-ipc-server="\$SOCK" \
+  "\$URL"
+EC=\$?
+
+# Cleanup
+kill -TERM "\$FEHPID" "\$PADPID" >/dev/null 2>&1 || true
+wait "\$FEHPID" 2>/dev/null || true
+wait "\$PADPID" 2>/dev/null || true
+exit "\$EC"
+EOF
+chmod +x "$CLIENT"
+
+VT="$(fgconsole 2>/dev/null || echo 8)"
+echo "[radio] starting X on vt$VT…"
+xinit "$CLIENT" -- :1 vt"$VT" -quiet -nolisten tcp || true
+echo "[radio] xinit finished."

@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+need(){ command -v "$1" >/dev/null 2>&1 || { echo "[yt-pad] missing: $1" >&2; exit 2; }; }
+need convert; need jq
+
+CANVAS=256   # final square canvas size (e.g., 256)
+INNER=64     # max avatar size inside the canvas (e.g., 64)
+FORCE=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --canvas) CANVAS="${2:-256}"; shift 2;;
+    --inner)  INNER="${2:-64}";  shift 2;;
+    --force)  FORCE=1; shift;;
+    *) echo "[yt-pad] unknown arg: $1" >&2; exit 2;;
+  esac
+done
+
+AV_DIR="$HOME/.emulationstation/downloaded_images/youtube/avatars"
+META_DIR="$HOME/.emulationstation/downloaded_images/youtube/meta"
+[ -d "$AV_DIR" ] || { echo "[yt-pad] no avatars dir: $AV_DIR"; exit 1; }
+mkdir -p "$META_DIR"
+
+pad_one() {
+  local in="$1" out="$2"
+  mkdir -p "$(dirname "$out")"
+  convert "$in" -alpha on \
+    -resize "${INNER}x${INNER}" \
+    -background none -gravity center \
+    -extent "${CANVAS}x${CANVAS}" \
+    -strip "$out"
+}
+
+count=0; changed=0; skipped=0; errors=0
+while IFS= read -r -d '' m; do
+  base="$(basename "$m" .json)"
+  img="$(jq -r '.image // empty' "$m")"
+
+  # If meta missing image path, try to find one by filename
+  if [ -z "$img" ]; then
+    for ext in png jpg jpeg webp gif ico; do
+      cand="$AV_DIR/$base.$ext"
+      [ -f "$cand" ] && { img="$cand"; break; }
+    done
+    [ -z "$img" ] && { skipped=$((skipped+1)); continue; }
+  fi
+
+  out="$AV_DIR/$base.png"   # normalize to PNG
+  count=$((count+1))
+
+  if [ "$FORCE" -ne 1 ] && [ -f "$out" ]; then
+    skipped=$((skipped+1)); continue
+  fi
+
+  if pad_one "$img" "$out"; then
+    tmp="$(mktemp)"
+    jq --arg image "$out" '.image = $image' "$m" >"$tmp" && mv "$tmp" "$m"
+    changed=$((changed+1))
+    echo "[yt-pad] + $base -> $(basename "$out") (${CANVAS}x${CANVAS}, inner ${INNER})"
+  else
+    echo "[yt-pad] ! FAILED: $img" >&2
+    errors=$((errors+1))
+  fi
+done < <(find "$META_DIR" -type f -name '*.json' -print0 | sort -z)
+
+echo "[yt-pad] Done. total:$count  changed:$changed  skipped:$skipped  errors:$errors  canvas:${CANVAS}px inner:${INNER}px"

@@ -1,8 +1,0 @@
-# Allow user %sudo to launch/stop VT kiosk clients without password
-Defaults!/usr/local/sbin/kiosk-vt-launch !requiretty
-Defaults!/usr/local/sbin/kiosk-saver-start !requiretty
-Defaults!/usr/local/sbin/kiosk-saver-stop  !requiretty
-
-%sudo ALL=(root) NOPASSWD: /usr/local/sbin/kiosk-vt-launch *
-%sudo ALL=(root) NOPASSWD: /usr/local/sbin/kiosk-saver-start *
-%sudo ALL=(root) NOPASSWD: /usr/local/sbin/kiosk-saver-stop *

@@ -1,0 +1,9 @@
+<system>
+  <name>gb</name>
+  <fullname>Game Boy</fullname>
+  <path>[ROM-FOLDER]/gb</path>
+  <extension>.7z .gb .zip .7Z .GB .ZIP</extension>
+  <command>/opt/retropie/supplementary/runcommand/runcommand.sh 0 _SYS_ gb %ROM%</command>
+  <platform>gb</platform>
+  <theme>gb</theme>
+</system>

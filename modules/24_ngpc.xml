@@ -1,0 +1,9 @@
+<system>
+  <name>ngpc</name>
+  <fullname>Neo Geo Pocket Color</fullname>
+  <path>[ROM-FOLDER]/ngpc</path>
+  <extension>.7z .ngc .zip .7Z .NGC .ZIP</extension>
+  <command>/opt/retropie/supplementary/runcommand/runcommand.sh 0 _SYS_ ngpc %ROM%</command>
+  <platform>ngpc</platform>
+  <theme>ngpc</theme>
+</system>

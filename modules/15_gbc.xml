@@ -1,0 +1,9 @@
+<system>
+  <name>gbc</name>
+  <fullname>Game Boy Color</fullname>
+  <path>[ROM-FOLDER]/gbc</path>
+  <extension>.7z .gbc .zip .7Z .GBC .ZIP</extension>
+  <command>/opt/retropie/supplementary/runcommand/runcommand.sh 0 _SYS_ gbc %ROM%</command>
+  <platform>gbc</platform>
+  <theme>gbc</theme>
+</system>

@@ -1,0 +1,9 @@
+<system>
+  <name>channelf</name>
+  <fullname>Fairchild ChannelF</fullname>
+  <path>[ROM-FOLDER]/channelf</path>
+  <extension>.bin .rom .zip .7z .BIN .ROM .ZIP .7Z</extension>
+  <command>/opt/retropie/supplementary/runcommand/runcommand.sh 0 _SYS_ channelf %ROM%</command>
+  <platform>channelf</platform>
+  <theme>channelf</theme>
+</system>

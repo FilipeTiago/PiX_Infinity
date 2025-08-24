@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+need(){ command -v "$1" >/dev/null 2>&1 || { echo "[services] missing: $1" >&2; exit 2; }; }
+need pix_rom_location; need curl; need jq
+
+DEBUG=0; FORCE=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --debug) DEBUG=1;;
+    --force) FORCE=1;;
+    *) echo "[services] unknown arg: $1" >&2; exit 2;;
+  esac; shift
+done
+say(){ [ "$DEBUG" -eq 1 ] && echo "[services] $*"; }
+trim(){ sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'; }
+
+ROM_ROOT="$(pix_rom_location services || true)"
+[ -n "$ROM_ROOT" ] || { echo "[services] ROM root not found"; exit 1; }
+[ -d "$ROM_ROOT" ] || { echo "[services] Not a directory: $ROM_ROOT"; exit 1; }
+
+LOGO_DIR="$HOME/.emulationstation/downloaded_images/services/logos"
+META_DIR="$HOME/.emulationstation/downloaded_images/services/meta"
+mkdir -p "$LOGO_DIR" "$META_DIR"
+
+UA="Mozilla/5.0 (X11; Linux) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36 pix-infinity/1.0"
+
+slug(){ printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/_/g; s/^_+//; s/_+$//'; }
+titlecase(){
+  # Turn netflix -> Netflix, disney_plus -> Disney Plus, hbo -> HBO (specials handled below)
+  local s="$1"; s="${s//_/ }"; s="${s//-/ }"
+  awk '{
+    for(i=1;i<=NF;i++){ $i=toupper(substr($i,1,1)) tolower(substr($i,2)) }
+    print
+  }' <<<"$s" | sed 's/[[:space:]]\+/ /g'
+}
+
+# Prefer domain from URL in file; else guess
+domain_from_file(){
+  local file="$1" url dom
+  url="$(head -n1 "$file" 2>/dev/null | trim || true)"
+  [ -z "$url" ] && return 1
+  dom="$(printf '%s' "$url" | sed -E 's#^[a-zA-Z]+://##; s#/.*$##; s/^www\.//')"
+  [ -n "$dom" ] || return 1
+  printf '%s' "$dom"
+}
+
+# Known brand → domain map (extend as needed)
+domain_from_name(){
+  local name="$1"; name="$(slug "$name")"
+  case "$name" in
+    netflix) echo "netflix.com";;
+    disneyplus|disney_plus|disney) echo "disneyplus.com";;
+    hbo|max|hbomax|hbo_max) echo "max.com";;
+    crunchyroll) echo "crunchyroll.com";;
+    youtube|yt) echo "youtube.com";;
+    twitch) echo "twitch.tv";;
+    primevideo|amazonprime|amazon_prime|amazon_prime_video) echo "primevideo.com";;
+    paramountplus|paramount) echo "paramountplus.com";;
+    peacock|peacocktv) echo "peacocktv.com";;
+    spotify) echo "spotify.com";;
+    deezer) echo "deezer.com";;
+    soundcloud|sound_cloud) echo "soundcloud.com";;
+    plex) echo "plex.tv";;
+    vimeo) echo "vimeo.com";;
+    appleTV|appletv|apple_tv|tv_plus|apple_tv_plus) echo "tv.apple.com";;
+    *) echo ""; return 1;;
+  esac
+}
+
+guess_domain(){
+  local name="$1" d
+  # Try known map
+  if d="$(domain_from_name "$name" 2>/dev/null)"; then printf '%s' "$d"; return 0; fi
+  # Fallback candidates
+  for tld in com tv net io app org; do
+    printf '%s.%s\n' "$(slug "$name")" "$tld"
+    break
+  done
+}
+
+download_logo(){
+  # $1 domain, $2 outbase (without ext). Use Google s2 256px; tolerate all statuses.
+  local dom="$1" base="$2" url out ct ext ext2
+  url="https://www.google.com/s2/favicons?sz=256&domain_url=https://$dom"
+  out="$(mktemp)"
+  if ! curl -sSL -A "$UA" -o "$out" "$url"; then rm -f "$out"; return 1; fi
+  # try to get content-type; if not, default png
+  ct="$(curl -sSIL -A "$UA" "$url" 2>/dev/null | awk -F': ' 'BEGIN{IGNORECASE=1}/^Content-Type:/{print tolower($2); exit}' | tr -d "\r")"
+  case "$ct" in
+    image/png*) ext="png";;
+    image/jpeg*) ext="jpg";;
+    image/webp*) ext="webp";;
+    image/gif*) ext="gif";;
+    image/x-icon*|image/vnd.microsoft.icon*) ext="ico";;
+    *) ext="png";;
+  esac
+  # If URL has an explicit extension (not here), prefer that
+  ext2="${url##*.}"; [[ "$ext2" =~ ^(png|jpg|jpeg|gif|webp|ico)$ ]] && ext="$ext2"
+  mv "$out" "${base}.${ext}"
+  echo "${base}.${ext}"
+}
+
+index_one(){
+  local file="$1"
+  local name="$(basename "$file" .sh)"
+  local sname="$(slug "$name")"
+  local title rawtitle image_path meta_path dest_base dom
+
+  rawtitle="$(titlecase "$name")"
+  # Special brand stylings
+  case "$sname" in
+    hbo|hbomax|max) title="HBO Max";;
+    disneyplus|disney_plus) title="Disney+";;
+    primevideo|amazonprime|amazon_prime|amazon_prime_video) title="Prime Video";;
+    youtube|yt) title="YouTube";;
+    *) title="$rawtitle";;
+  esac
+
+  # Determine domain
+  if ! dom="$(domain_from_file "$file" 2>/dev/null)"; then
+    dom="$(guess_domain "$name")"
+  fi
+
+  say "scan: $name  domain=${dom:-?}"
+
+  dest_base="$LOGO_DIR/$sname"
+  meta_path="$META_DIR/$sname.json"
+  image_path=""
+
+  # Reuse unless --force
+  if [ "$FORCE" -eq 0 ] && [ -f "$meta_path" ]; then
+    image_path="$(jq -r '.image // empty' "$meta_path" 2>/dev/null || true)"
+  fi
+  if [ -z "$image_path" ] || [ "$FORCE" -eq 1 ]; then
+    rm -f "${dest_base}".{png,jpg,jpeg,webp,gif,ico} 2>/dev/null || true
+    if [ -n "$dom" ]; then
+      if out="$(download_logo "$dom" "$dest_base" 2>/dev/null)"; then
+        image_path="$out"
+      fi
+    fi
+    # If still empty (no domain), try a last-resort generic favicon from the filename guess
+    if [ -z "$image_path" ]; then
+      if out="$(download_logo "$(guess_domain "$name")" "$dest_base" 2>/dev/null)"; then
+        image_path="$out"
+      fi
+    fi
+  fi
+
+  # Write meta JSON (desc optional; keep it simple)
+  jq -n --arg name "$name" --arg title "$title" \
+        --arg url "$(head -n1 "$file" 2>/dev/null | trim || true)" \
+        --arg image "${image_path:-}" --arg desc "" \
+        '{name:$name,title:$title,url:$url,image:$image,description:$desc}' > "$meta_path"
+
+  say "ok: $name → $(basename "${image_path:-NONE}")"
+}
+
+count=0
+while IFS= read -r -d '' f; do
+  case "$f" in *.sh|*.SH) index_one "$f"; count=$((count+1));; esac
+done < <(find "$ROM_ROOT" -type f -iname '*.sh' -print0 | sort -z)
+
+echo "[services] Done. ROM root: $ROM_ROOT | logos: $LOGO_DIR | meta: $META_DIR | files: $count"

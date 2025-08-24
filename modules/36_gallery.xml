@@ -1,0 +1,9 @@
+<system>
+  <name>gallery</name>
+  <fullname>gallery</fullname>
+  <path>[ROM-FOLDER]/gallery</path>
+  <extension>.jpg .jpeg .gif .png .bmp .JPG .JPEG .GIF .PNG .BMP</extension>
+  <command>/usr/local/bin/pix_vt_switch 8 /bin/bash -lc '/usr/local/bin/pix_feh_gallery "%ROM%"'</command>
+  <platform>feh</platform>
+  <theme>gallery</theme>
+</system>

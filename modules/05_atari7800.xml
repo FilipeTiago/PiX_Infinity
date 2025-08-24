@@ -1,0 +1,9 @@
+<system>
+  <name>atari7800</name>
+  <fullname>Atari 7800 ProSystem</fullname>
+  <path>[ROM-FOLDER]/atari7800</path>
+  <extension>.7z .a78 .bin .zip .7Z .A78 .BIN .ZIP</extension>
+  <command>/opt/retropie/supplementary/runcommand/runcommand.sh 0 _SYS_ atari7800 %ROM%</command>
+  <platform>atari7800</platform>
+  <theme>atari7800</theme>
+</system>

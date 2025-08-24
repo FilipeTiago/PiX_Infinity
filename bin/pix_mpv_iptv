@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# IPTV (video) player with mpv on a dedicated X VT + gamepad A=quit
+# Usage: pix_mpv_iptv "<path/to/channel.m3u>"  OR  pix_mpv_iptv "<stream URL>"
+set -Eeuo pipefail
+
+LOG="/tmp/pix_mpv_iptv.$$.log"
+exec > >(stdbuf -oL tee -a "$LOG") 2>&1
+echo "=== pix_mpv_iptv ENTRY $(date -Is) pid=$$ ==="
+
+need(){ command -v "$1" >/dev/null 2>&1 || { echo "[iptv] missing: $1" >&2; exit 2; }; }
+need realpath; need xinit; need mpv; need awk; need sed; need grep
+
+RAW="${1:?need m3u or URL}"
+RAW="${RAW//\\ / }"
+SEL="$(realpath -m "$RAW" 2>/dev/null || echo "$RAW")"
+
+URL=""; NAME=""; UA=""; REF=""
+
+if [[ -f "$SEL" ]]; then
+  # Get channel name from #EXTINF (if present)
+  NAME="$(awk -F, '/^#EXTINF:/ {n=$2} END{print n}' "$SEL" || true)"
+  # VLC options some playlists use
+  UA="$(awk -F= '/^#EXTVLCOPT:http-user-agent=/ {print $2; exit}' "$SEL" || true)"
+  REF="$(awk -F= '/^#EXTVLCOPT:http-referrer=/ {print $2; exit}' "$SEL" || true)"
+  # First non-comment URL
+  URL="$(grep -vE '^\s*#' "$SEL" | sed -n '1p' | sed 's/\r$//' || true)"
+  [[ -n "$URL" ]] || { echo "[iptv] no URL in $SEL"; exit 1; }
+else
+  URL="$SEL"
+fi
+
+# Fallback title
+if [[ -z "$NAME" ]]; then
+  if [[ -f "$SEL" ]]; then
+    NAME="$(basename -- "$SEL")"; NAME="${NAME%.*}"
+  else
+    NAME="$(echo "$URL" | sed -E 's#^https?://##; s#/.*##')"  # host
+  fi
+fi
+echo "[iptv] url=$URL  name=$NAME  ua=${UA:-none}  ref=${REF:-none}"
+
+# Client that runs under xinit on the target VT
+SOCK="/tmp/mpv-iptv.$$.sock"
+CLIENT="/tmp/pix_mpv_iptv_client.$$.sh"
+cat > "$CLIENT" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+echo "[client] DISPLAY=$DISPLAY who=$(id -un)" >&2
+# --- AUDIO ENV (Pulse/PipeWire) ---
+USR_UID="$(id -u)"; export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$USR_UID}";
+if [ -S "$XDG_RUNTIME_DIR/pulse/native" ]; then export PULSE_SERVER="unix:$XDG_RUNTIME_DIR/pulse/native"; fi;
+export JACK_NO_START_SERVER=1
+
+# inherit from parent via env
+SOCK="${SOCK:?}"
+URL="${URL:?}"
+UA="${UA:-}"
+REF="${REF:-}"
+
+# Gamepad mapper (re-use music mapper: A=quit). Safe even if extra bindings exist.
+ /usr/local/bin/pix_padmap_mpv_music "$SOCK" >/tmp/pix_padmap_mpv_iptv.$$.log 2>&1 &
+PADPID=$!
+
+# Assemble mpv opts: no user/system config; fullscreen; no terminal UI; IPC for pad
+OPTS=( --no-config
+       --no-terminal
+       --force-window=yes
+       --fullscreen
+       --osc=no
+       --input-ipc-server="$SOCK"
+     )
+[[ -n "$UA"  ]] && OPTS+=( --user-agent="$UA" )
+[[ -n "$REF" ]] && OPTS+=( --http-header-fields="Referer: $REF" )
+
+/usr/bin/mpv "${OPTS[@]}" -- "$URL"
+EC=$?
+
+# Cleanup
+kill -TERM "$PADPID" >/dev/null 2>&1 || true
+wait "$PADPID" 2>/dev/null || true
+exit "$EC"
+EOF
+chmod +x "$CLIENT"
+
+# Export values for the here-doc (kept separate to avoid quoting headaches)
+export SOCK URL UA REF
+
+VT="$(fgconsole 2>/dev/null || echo 8)"
+echo "[iptv] starting X on vt$VT…"
+xinit "$CLIENT" -- :1 vt"$VT" -quiet -nolisten tcp || true
+echo "[iptv] xinit finished."

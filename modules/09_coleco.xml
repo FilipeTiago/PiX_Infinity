@@ -1,0 +1,9 @@
+<system>
+  <name>coleco</name>
+  <fullname>ColecoVision</fullname>
+  <path>[ROM-FOLDER]/coleco</path>
+  <extension>.bin .col .rom .zip .BIN .COL .ROM .ZIP</extension>
+  <command>/opt/retropie/supplementary/runcommand/runcommand.sh 0 _SYS_ coleco %ROM%</command>
+  <platform>colecovision</platform>
+  <theme>colecovision</theme>
+</system>

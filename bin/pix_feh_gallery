@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Usage: pix_feh_gallery [--delay N] <image-or-folder>
+set -u
+export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+
+VT_NOW="$(fgconsole 2>/dev/null || echo 3)"
+RUNLOG="/tmp/pix_feh.$$.vt${VT_NOW}.log"
+log(){ echo "[feh] $*" >>"$RUNLOG"; }
+echo "==== pix_feh_gallery pid=$$ user=$(id -un) home=$HOME vt=$VT_NOW ====" >>"$RUNLOG"
+
+DELAY="${PIX_GALLERY_DURATION:-5}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --delay) DELAY="${2:-5}"; shift 2;;
+    --) shift; break;;
+    *) break;;
+  esac
+done
+
+TARGET="${1:-}"; [ -n "$TARGET" ] || { log "no target"; exit 2; }
+
+abspath() { python3 - "$1" <<'PY' 2>/dev/null || readlink -f "$1"
+import os,sys; print(os.path.realpath(sys.argv[1]))
+PY
+}
+TGT="$(abspath "$TARGET")" || TGT="$TARGET"
+if [ -d "$TGT" ]; then DIR="$TGT"; START=""; else DIR="$(dirname "$TGT")"; START="$TGT"; fi
+
+VT="$(fgconsole 2>/dev/null || echo 3)"
+log "VT=$VT DIR=$DIR START=${START:-<first>} DELAY=$DELAY"
+
+CLIENT="$(mktemp /tmp/pix_feh_client.XXXXXX.sh)"; trap 'rm -f "$CLIENT"' EXIT
+cat >"$CLIENT" <<CL
+#!/usr/bin/env bash
+set -u
+export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+export DISPLAY=":1"
+echo "[client] who=\$(id -un) HOME=\$HOME DISPLAY=\$DISPLAY" >&2
+
+# start pad mapper in background
+/usr/local/bin/pix_padmap_feh >/tmp/pix_padmap.\$\$.log 2>&1 &
+PADPID=\$!
+
+# run feh
+exec /usr/bin/feh -F -Y -Z --sort filename --slideshow-delay "$DELAY" \
+  ${START:+--start-at "$START"} "$DIR"
+CL
+chmod +x "$CLIENT"
+log "client=$CLIENT"
+sed 's/^/[client] /' "$CLIENT" >>"$RUNLOG"
+
+log "launching xinit…"
+xinit "$CLIENT" -- :1 -nolisten tcp vt"$VT" -keeptty -verbose 3 >>"$RUNLOG" 2>&1
+rc=$?
+log "xinit exit code: $rc"
+exit "$rc"

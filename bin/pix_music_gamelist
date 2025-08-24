@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+set -euo pipefail
+need(){ command -v "$1" >/dev/null 2>&1 || { echo "[music-gamelist] missing: $1" >&2; exit 2; }; }
+need pix_rom_location; command -v ffprobe >/dev/null 2>&1 || true
+
+INCLUDE_FOLDERS=1; TRACKS=1
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-folders) INCLUDE_FOLDERS=0;;
+    --folders-only) INCLUDE_FOLDERS=1; TRACKS=0;;
+    *) echo "[music-gamelist] unknown arg: $1" >&2; exit 2;;
+  esac
+  shift
+done
+
+ROM_ROOT="$(pix_rom_location music || true)"
+[ -n "${ROM_ROOT:-}" ] || { echo "[music-gamelist] ROM root not found"; exit 1; }
+[ -d "$ROM_ROOT" ] || { echo "[music-gamelist] not a directory: $ROM_ROOT"; exit 1; }
+
+COV_ROOT="$HOME/.emulationstation/downloaded_images/music/covers"
+GAMELIST="$ROM_ROOT/gamelist.xml"
+ext_audio='\(mp3\|flac\|m4a\|aac\|ogg\|opus\|wav\|wma\|aif\|aiff\)'
+
+xml_escape(){ sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/\"/\&quot;/g' -e "s/'/\&apos;/g"; }
+get_tag(){ command -v ffprobe >/dev/null 2>&1 || { echo ""; return; }
+  ffprobe -v quiet -show_entries format_tags="$2" -of default=nw=1:nk=1 "$1" 2>/dev/null | head -n1; }
+cover_for(){
+  # $1 dir (relative to ROM_ROOT)
+  local d="$1" p
+  p="$COV_ROOT/$d"
+  for ext in jpg jpeg png webp gif; do
+    [ -f "$p/cover.$ext" ] && { echo "$p/cover.$ext"; return; }
+  done
+  # walk up tree
+  while [ "$d" != "." ] && [ -n "$d" ]; do
+    d="$(dirname "$d")"; [ "$d" = "/" ] && break
+    for ext in jpg jpeg png webp gif; do
+      [ -f "$COV_ROOT/$d/cover.$ext" ] && { echo "$COV_ROOT/$d/cover.$ext"; return; }
+    done
+  done
+  echo ""
+}
+
+tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
+{
+  echo '<?xml version="1.0"?>'
+  echo '<gameList>'
+} > "$tmp"
+
+folders_written=0
+tracks_written=0
+
+# --- FOLDERS ---
+if [ "$INCLUDE_FOLDERS" -eq 1 ]; then
+  # Unique dirs that have audio
+  mapfile -d '' DIRS < <(find "$ROM_ROOT" -type f -iregex ".*\.$ext_audio" -printf '%h\0' | sort -zu)
+  for dir in "${DIRS[@]}"; do
+    rel="${dir#$ROM_ROOT/}"; [ "$rel" = "$dir" ] && rel="."
+    img="$(cover_for "$rel")"
+
+    # Pick a representative track for metadata
+    trk="$(find "$dir" -maxdepth 1 -type f -iregex ".*\.$ext_audio" | sort | head -n1)"
+    base_name="$(basename "$dir")"
+    name="$base_name"
+    desc=""
+    if [ -n "$trk" ]; then
+      artist="$(get_tag "$trk" artist)"; album="$(get_tag "$trk" album)"
+      if [ -n "$artist" ] && [ -n "$album" ]; then
+        name="$album"; desc="$artist — $album"
+      elif [ -n "$album" ]; then
+        name="$album"
+      elif [ -n "$artist" ]; then
+        desc="$artist"
+      fi
+    fi
+
+    {
+      echo '  <folder>'
+      echo "    <path>./$(printf '%s' "$rel" | xml_escape)</path>"
+      echo "    <name>$(printf '%s' "$name" | xml_escape)</name>"
+      [ -n "$img" ] && echo "    <image>$(printf '%s' "$img" | xml_escape)</image>"
+      [ -n "$desc" ] && echo "    <desc>$(printf '%s' "$desc" | xml_escape)</desc>"
+      echo '  </folder>'
+    } >> "$tmp"
+    folders_written=$((folders_written+1))
+  done
+fi
+
+# --- TRACKS ---
+if [ "$TRACKS" -eq 1 ]; then
+  while IFS= read -r -d '' f; do
+    rel="${f#$ROM_ROOT/}"
+    drel="$(dirname "$rel")"; [ -z "$drel" ] && drel="."
+    img="$(cover_for "$drel")"
+
+    base="$(basename "$f")"
+    title="$(get_tag "$f" title)"
+    artist="$(get_tag "$f" artist)"
+    album="$(get_tag "$f" album)"
+
+    [ -z "$title" ] && title="${base%.*}"
+    desc=""
+    if [ -n "$artist" ] && [ -n "$album" ]; then
+      desc="$artist — $album"
+    elif [ -n "$artist" ]; then
+      desc="$artist"
+    elif [ -n "$album" ]; then
+      desc="$album"
+    fi
+
+    {
+      echo '  <game>'
+      echo "    <path>./$(printf '%s' "$rel" | xml_escape)</path>"
+      echo "    <name>$(printf '%s' "$title" | xml_escape)</name>"
+      [ -n "$img" ] && echo "    <image>$(printf '%s' "$img" | xml_escape)</image>"
+      [ -n "$desc" ] && echo "    <desc>$(printf '%s' "$desc" | xml_escape)</desc>"
+      echo '  </game>'
+    } >> "$tmp"
+    tracks_written=$((tracks_written+1))
+  done < <(find "$ROM_ROOT" -type f -iregex ".*\.$ext_audio" -print0 | sort -z)
+fi
+
+echo '</gameList>' >> "$tmp"
+mv "$tmp" "$GAMELIST"
+chmod 644 "$GAMELIST"
+echo "[music-gamelist] wrote $GAMELIST  (folders:$folders_written tracks:$tracks_written)"

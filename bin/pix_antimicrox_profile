@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Usage: pix_antimicrox_profile --profile <name|/path/file.amgp> [--eventgen uinput|xtest] [--no-kill-others] -- <command> [args...]
+
+set -Eeuo pipefail
+amx_bin="$(command -v antimicrox || command -v antimicro || true)"
+[ -n "$amx_bin" ] || { echo "[pix-profile] antimicrox/antimicro not found" >&2; exit 2; }
+
+PROFILE=""; EVENTGEN="uinput"; KILL_OTHERS=1
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --profile) PROFILE="${2:-}"; shift 2;;
+    --eventgen) EVENTGEN="${2:-uinput}"; shift 2;;
+    --no-kill-others) KILL_OTHERS=0; shift;;
+    --) shift; break;;
+    *) echo "[pix-profile] unknown arg: $1" >&2; exit 2;;
+  esac
+done
+[ -n "$PROFILE" ] || { echo "[pix-profile] --profile required" >&2; exit 2; }
+[ $# -ge 1 ] || { echo "[pix-profile] missing command after --" >&2; exit 2; }
+
+RUN_AS="${SUDO_USER:-$USER}"
+USER_HOME="$(getent passwd "$RUN_AS" | cut -d: -f6)"; [ -n "$USER_HOME" ] || USER_HOME="$HOME"
+
+# Resolve profile path
+if [[ "$PROFILE" == */* ]]; then
+  PROFILE_PATH="$PROFILE"
+else
+  PROFILE_PATH="$USER_HOME/.config/antimicrox/profiles/${PROFILE}.amgp"
+fi
+[ -f "$PROFILE_PATH" ] || { echo "[pix-profile] profile not found: $PROFILE_PATH" >&2; exit 2; }
+
+# Logging
+RUNLOG="/tmp/pix_amx.$$.log"
+{
+  echo "[amx] user=$RUN_AS bin=$amx_bin profile=$PROFILE_PATH eventgen=$EVENTGEN"
+  echo -n "[amx] /dev/uinput: "; ls -l /dev/uinput 2>&1 || true
+  echo "[amx] groups($RUN_AS): $(id -nG "$RUN_AS" 2>/dev/null || true)"
+} >>"$RUNLOG"
+
+# Kill other instances (user scope) if requested
+if [ "$KILL_OTHERS" -eq 1 ]; then
+  sudo -u "$RUN_AS" bash -lc 'pkill -u "$USER" -f "(^|/)antimicro(x)?(\s|$)" 2>/dev/null || true'
+fi
+
+# Start daemon
+if [ "$EVENTGEN" = "xtest" ]; then
+  # xtest needs DISPLAY – caller must ensure DISPLAY is set appropriately
+  sudo -u "$RUN_AS" env HOME="$USER_HOME" bash -lc '
+    exec '"$amx_bin"' --eventgen xtest --profile "'"$PROFILE_PATH"'" --daemon
+  ' >/dev/null 2>&1 || true
+else
+  # default: uinput (works system-wide, no DISPLAY needed)
+  sudo -u "$RUN_AS" env HOME="$USER_HOME" bash -lc '
+    exec '"$amx_bin"' --eventgen uinput --profile "'"$PROFILE_PATH"'" --daemon
+  ' >/dev/null 2>&1 || true
+fi
+
+# Find the newest antimicro(x) PID for this user
+amx_pid=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  amx_pid="$(pgrep -u "$RUN_AS" -n -f "(^|/)(antimicrox|antimicro)(\\s|$)")" || true
+  [ -n "$amx_pid" ] && break
+  sleep 0.1
+done
+if [ -z "$amx_pid" ]; then
+  echo "[amx] WARN: antimicrox did not appear; continuing without it" >>"$RUNLOG"
+else
+  echo "[amx] started pid=$amx_pid" >>"$RUNLOG"
+fi
+
+cleanup() {
+  [ -z "$amx_pid" ] && return 0
+  kill "$amx_pid" 2>/dev/null || true
+  for _ in 1 2 3; do sleep 0.2; ! kill -0 "$amx_pid" 2>/dev/null && break || true; done
+  kill -9 "$amx_pid" 2>/dev/null || true
+  echo "[amx] stopped pid=$amx_pid" >>"$RUNLOG"
+}
+trap cleanup EXIT INT TERM
+
+exec sudo -u "$RUN_AS" env HOME="$USER_HOME" "$@"
