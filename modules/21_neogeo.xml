@@ -1,0 +1,9 @@
+<system>
+  <name>neogeo</name>
+  <fullname>Neo Geo</fullname>
+  <path>[ROM-FOLDER]/neogeo</path>
+  <extension>.7z .chd .cue .fba .iso .zip .7Z .CHD .CUE .FBA .ISO .ZIP</extension>
+  <command>/opt/retropie/supplementary/runcommand/runcommand.sh 0 _SYS_ neogeo %ROM%</command>
+  <platform>neogeo</platform>
+  <theme>neogeo</theme>
+</system>

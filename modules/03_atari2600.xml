@@ -1,0 +1,9 @@
+<system>
+  <name>atari2600</name>
+  <fullname>Atari 2600</fullname>
+  <path>[ROM-FOLDER]/atari2600</path>
+  <extension>.7z .a26 .bin .rom .zip .gz .7Z .A26 .BIN .ROM .ZIP .GZ</extension>
+  <command>/opt/retropie/supplementary/runcommand/runcommand.sh 0 _SYS_ atari2600 %ROM%</command>
+  <platform>atari2600</platform>
+  <theme>atari2600</theme>
+</system>

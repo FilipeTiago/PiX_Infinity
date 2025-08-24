@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+LOG="/tmp/pix_chromium_service.$$.log"
+exec > >(stdbuf -oL tee -a "$LOG") 2>&1
+echo "=== pix_chromium_service $(date -Is) pid=$$ ==="
+
+need(){ command -v "$1" >/dev/null 2>&1 || { echo "[svc] missing: $1" >&2; exit 2; }; }
+need awk; need sed; need grep
+CHROME_BIN="$(command -v chromium-browser || command -v chromium || true)"
+[ -n "$CHROME_BIN" ] || { echo "[svc] chromium not found"; exit 2; }
+
+RAW="${1:?need rom or url}"; RAW="${RAW//\\ / }"
+URL=""
+if [ -f "$RAW" ]; then
+  URL="$(grep -vE '^\s*#' "$RAW" | sed -n '1p' | sed 's/\r$//' | xargs || true)"
+else
+  URL="$RAW"
+fi
+[[ "$URL" =~ ^https?:// ]] || { echo "[svc] invalid URL: $URL"; exit 1; }
+
+# Profile: normal vs saver
+if [ "${PIX_SAVER:-0}" = "1" ]; then
+  PROFILE="${PROFILE:-$HOME/.config/chromium-saver}"
+else
+  PROFILE="${PROFILE:-$HOME/.config/chromium-services}"
+fi
+mkdir -p "$PROFILE"
+
+# Display + reuse flag
+DISPLAY_REQ="${DISPLAY:-:1}"
+REUSE="${PIX_REUSE_X:-0}"
+VT="${PIX_VT:-$(fgconsole 2>/dev/null || echo 8)}"
+
+# -------- Extensions (optional & safe) --------
+# Defaults: keep ad-skip + on-screen keyboard (omit the old yt-autoplay)
+DEF_EXT_NORMAL="/opt/pix/chrome/extensions/pix-yt-skip,/opt/pix/chrome_ext/osk,/opt/pix/chrome/extensions/pix-yt-autofull"
+DEF_EXT_SAVER="/opt/pix/chrome/extensions/pix-yt-skip"
+
+# Choose list depending on mode, allow override, and allow disabling with "none"
+RAW_EXT_LIST=""
+if [ "${PIX_SAVER:-0}" = "1" ]; then
+  RAW_EXT_LIST="${PIX_EXT_SAVER:-${PIX_EXT:-$DEF_EXT_SAVER}}"
+else
+  RAW_EXT_LIST="${PIX_EXT:-$DEF_EXT_NORMAL}"
+fi
+
+EXT_ARG=""
+if [ -n "$RAW_EXT_LIST" ] && [ "$RAW_EXT_LIST" != "none" ]; then
+  # keep only directories that actually exist
+  IFS=',' read -r -a CANDS <<< "$RAW_EXT_LIST"
+  EXISTING=()
+  for d in "${CANDS[@]}"; do
+    [ -d "$d" ] && EXISTING+=("$d")
+  done
+  if [ "${#EXISTING[@]}" -gt 0 ]; then
+    EXT_ARG="--load-extension=$(IFS=','; echo "${EXISTING[*]}")"
+  fi
+fi
+
+echo "[svc] URL=$URL  VT=$VT  profile=$PROFILE  DISPLAY=$DISPLAY_REQ  REUSE=$REUSE"
+[ -n "$EXT_ARG" ] && echo "[svc] extensions: $EXT_ARG" || echo "[svc] extensions: (none)"
+
+# ---- build client ----
+CLIENT="/tmp/pix_chromium_service_client.$$.sh"
+cat > "$CLIENT" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+echo "[client] DISPLAY=$DISPLAY who=$(id -un)" >&2
+
+URL="${URL:?}"; PROFILE="${PROFILE:?}"; CHROME_BIN="${CHROME_BIN:?}"
+EXT_ARG="${EXT_ARG:-}"
+
+# Stay awake, tidy cursor behaviour
+command -v xset >/dev/null 2>&1 && { xset -dpms; xset s off; xset s noblank || true; }
+
+# Minimal WM
+if command -v matchbox-window-manager >/dev/null 2>&1; then
+  matchbox-window-manager -use_titlebar no >/tmp/pix_mbwm.$$.log 2>&1 &
+  WMPID=$!
+elif command -v openbox >/dev/null 2>&1; then
+  openbox >/tmp/pix_openbox.$$.log 2>&1 &
+  WMPID=$!
+else
+  WMPID=""
+fi
+sleep 0.15
+
+# Cursor theme/size
+export XCURSOR_THEME=DMZ-White
+export XCURSOR_SIZE=64
+xsetroot -cursor_name left_ptr || true
+
+# Hide cursor only when idle
+if command -v unclutter-xfixes >/dev/null 2>&1; then
+  unclutter-xfixes -idle 2 -root >/dev/null 2>&1 &
+fi
+
+# Gamepad mapper (not in screensaver)
+if [ "${PIX_SAVER:-0}" != "1" ]; then
+  /usr/local/bin/pix_padmap_chromium_xtest >/tmp/pix_padmap_chromium_xtest.$$.log 2>&1 &
+  PADPID=$!
+else
+  PADPID=""
+fi
+
+# --- Audio env (PipeWire / Pulse) ---
+USR_UID="$(id -u)"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$USR_UID}"
+if [ -S "$XDG_RUNTIME_DIR/pulse/native" ]; then
+  export PULSE_SERVER="unix:$XDG_RUNTIME_DIR/pulse/native"
+fi
+if [ -S "$XDG_RUNTIME_DIR/bus" ]; then
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+fi
+
+# Chromium in kiosk (+ extensions if any)
+exec "$CHROME_BIN" \
+  --kiosk "$URL" \
+  --start-fullscreen \
+  --window-position=0,0 \
+  --user-data-dir="$PROFILE" \
+  --password-store=basic \
+  --no-first-run --no-default-browser-check \
+  --disable-features=TranslateUI \
+  --disable-translate --disable-infobars \
+  --overscroll-history-navigation=0 \
+  --autoplay-policy=no-user-gesture-required \
+  ${EXT_ARG:+$EXT_ARG}
+EC=$?
+
+# cleanup
+[ -n "${PADPID:-}" ] && kill -TERM "$PADPID" >/dev/null 2>&1 || true
+[ -n "${WMPID:-}" ] && kill -TERM "$WMPID"  >/dev/null 2>&1 || true
+wait >/dev/null 2>&1 || true
+exit "$EC"
+EOF
+chmod +x "$CLIENT"
+
+export URL PROFILE CHROME_BIN EXT_ARG
+
+# If user asked to reuse X and it's alive, run client directly
+if [ "$REUSE" = "1" ] && DISPLAY="$DISPLAY_REQ" xset q >/dev/null 2>&1; then
+  DISPLAY="$DISPLAY_REQ" bash "$CLIENT" || true
+else
+  # Start a fresh X on requested display
+  DISP_NUM="${DISPLAY_REQ#:}"
+  xinit "$CLIENT" -- ":$DISP_NUM" vt"$VT" -quiet -nolisten tcp || true
+fi
+echo "[svc] xinit finished."

@@ -1,0 +1,9 @@
+<system>
+  <name>mastersystem</name>
+  <fullname>Sega Master System</fullname>
+  <path>[ROM-FOLDER]/mastersystem</path>
+  <extension>.7z .sms .bin .zip .7Z .SMS .BIN .ZIP</extension>
+  <command>/opt/retropie/supplementary/runcommand/runcommand.sh 0 _SYS_ mastersystem %ROM%</command>
+  <platform>mastersystem</platform>
+  <theme>mastersystem</theme>
+</system>

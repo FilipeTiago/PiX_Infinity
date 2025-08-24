@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+import os, sys, time, json, socket, errno, re
+from evdev import InputDevice, list_devices, ecodes
+
+SOCK = sys.argv[1] if len(sys.argv) > 1 else "/tmp/mpv-videos.sock"
+LOG  = f"/tmp/pix_padmap_mpv.{os.getpid()}.log"
+
+def log(msg):
+    with open(LOG,"a") as f: f.write(msg+"\n")
+
+def codes(caps, evtype):
+    lst = caps.get(evtype, [])
+    out=[]
+    for item in lst:
+        if isinstance(item, (list, tuple)): out.append(item[0])
+        else: out.append(item)
+    return out
+
+def score_device(d: InputDevice):
+    try:
+        caps = d.capabilities()
+        keys = codes(caps, ecodes.EV_KEY)
+        absx = codes(caps, ecodes.EV_ABS)
+    except Exception:
+        return -999
+    score=0
+    name=(d.name or "").lower()
+    if re.search(r'(x-?box|gamepad|controller|joystick|8bitdo|dualshock|dualsense|pad)', name): score+=40
+    if ecodes.BTN_GAMEPAD in keys: score+=50
+    for btn in (ecodes.BTN_SOUTH, ecodes.BTN_EAST, ecodes.BTN_WEST, ecodes.BTN_NORTH):
+        if btn in keys: score+=10
+    for dpad in (ecodes.BTN_DPAD_LEFT, ecodes.BTN_DPAD_RIGHT, ecodes.BTN_DPAD_UP, ecodes.BTN_DPAD_DOWN):
+        if dpad in keys: score+=15
+    if ecodes.ABS_HAT0X in absx or ecodes.ABS_HAT0Y in absx: score+=20
+    if ecodes.ABS_X in absx or ecodes.ABS_Y in absx: score+=10
+    return score
+
+def pick_device():
+    devs=[InputDevice(p) for p in list_devices()]
+    if not devs: return None
+    pref_path=os.environ.get("PIX_PAD_DEVICE")
+    pref_name=os.environ.get("PIX_PAD_DEVICE_NAME","").lower()
+    if pref_path:
+        for d in devs:
+            if d.path==pref_path: return d
+    if pref_name:
+        for d in devs:
+            if (d.name or "").lower().find(pref_name)>=0: return d
+    best = max(devs, key=score_device)
+    if score_device(best) <= 0:
+        for d in devs:
+            try:
+                k = codes(d.capabilities(), ecodes.EV_KEY)
+                if (ecodes.BTN_SOUTH in k or ecodes.BTN_GAMEPAD in k or
+                    any(b in k for b in (ecodes.BTN_DPAD_LEFT,ecodes.BTN_DPAD_RIGHT,ecodes.BTN_DPAD_UP,ecodes.BTN_DPAD_DOWN))):
+                    return d
+            except Exception:
+                pass
+    return best
+
+def mpv_send(sock, cmd):
+    msg = json.dumps({"command":cmd}).encode("utf-8")+b"\n"
+    try: sock.sendall(msg)
+    except OSError: pass
+
+def ensure_symlink(path):
+    try:
+        if not path: return
+        base = os.path.basename(path)
+        if base.startswith("00_continue."): return
+        d = os.path.dirname(path)
+        link = os.path.join(d, "00_continue.mp4")
+        try:
+            if os.path.islink(link) or os.path.exists(link): os.remove(link)
+        except FileNotFoundError:
+            pass
+        os.symlink(path, link)
+    except Exception as e:
+        log(f"[symlink] error: {e}")
+
+# connect to mpv IPC (wait a bit if not ready)
+def connect(path, timeout=5.0):
+    t0=time.time()
+    while time.time()-t0 < timeout:
+        try:
+            s=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.connect(path)
+            s.setblocking(False)
+            return s
+        except OSError as e:
+            if e.errno in (errno.ENOENT, errno.ECONNREFUSED):
+                time.sleep(0.05); continue
+            raise
+    return None
+
+sock = connect(SOCK, timeout=6.0)
+if not sock:
+    log(f"[ipc] could not connect to {SOCK}; exiting")
+    sys.exit(0)
+
+# subscribe to "path" changes (file-loaded)
+mpv_send(sock, ["observe_property", 1, "path"])
+
+dev = pick_device()
+if not dev:
+    log("[pad] no input device; exiting")
+    sys.exit(0)
+
+log(f"[pad] picked {dev.path} ({dev.name}) score={score_device(dev)}")
+buf=b""
+
+# main loop: read pad + mpv events
+while True:
+    # Read mpv messages (non-blocking)
+    try:
+        chunk = sock.recv(4096)
+        if chunk:
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n",1)
+                if not line: continue
+                try:
+                    evt = json.loads(line.decode("utf-8", errors="ignore"))
+                    if evt.get("event")=="property-change" and evt.get("name")=="path":
+                        ensure_symlink(evt.get("data"))
+                except Exception as e:
+                    log(f"[ipc] parse err: {e}")
+        else:
+            # socket closed => mpv ended
+            break
+    except BlockingIOError:
+        pass
+    except OSError:
+        break
+
+    # Read pad events (non-blocking-ish)
+    try:
+        for e in dev.read():
+            if e.type==ecodes.EV_KEY:
+                if e.code==ecodes.BTN_SOUTH and e.value==1:
+                    mpv_send(sock, ["quit"])
+                elif e.code==ecodes.BTN_EAST and e.value==1:
+                    mpv_send(sock, ["cycle", "pause"])
+                elif e.code in (ecodes.BTN_DPAD_LEFT, ecodes.BTN_DPAD_RIGHT,
+                                ecodes.BTN_DPAD_UP, ecodes.BTN_DPAD_DOWN) and e.value==1:
+                    if e.code==ecodes.BTN_DPAD_LEFT:  mpv_send(sock, ["seek", -10, "relative", "exact"])
+                    if e.code==ecodes.BTN_DPAD_RIGHT: mpv_send(sock, ["seek",  10, "relative", "exact"])
+                    if e.code==ecodes.BTN_DPAD_UP:    mpv_send(sock, ["playlist-prev", "weak"])
+                    if e.code==ecodes.BTN_DPAD_DOWN:  mpv_send(sock, ["playlist-next", "weak"])
+            elif e.type==ecodes.EV_ABS:
+                # HAT as axes
+                if e.code==ecodes.ABS_HAT0X:
+                    if e.value==-1: mpv_send(sock, ["seek", -10, "relative", "exact"])
+                    elif e.value==1: mpv_send(sock, ["seek",  10, "relative", "exact"])
+                elif e.code==ecodes.ABS_HAT0Y:
+                    if e.value==-1: mpv_send(sock, ["playlist-prev", "weak"])
+                    elif e.value==1: mpv_send(sock, ["playlist-next", "weak"])
+    except BlockingIOError:
+        pass
+    except OSError:
+        time.sleep(0.01)
+        continue
+
+log("[pad] exit")

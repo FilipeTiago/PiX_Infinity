@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+import os, sys, time, signal, subprocess, re
+from evdev import InputDevice, list_devices, ecodes
+
+LOG = f"/tmp/pix_padmap.{os.getpid()}.log"
+def log(msg):
+    with open(LOG,"a") as f: f.write(msg+"\n")
+
+RUN=True
+def _stop(*_): 
+    global RUN; RUN=False
+signal.signal(signal.SIGINT,_stop); signal.signal(signal.SIGTERM,_stop)
+
+def xkey(key):
+    try:
+        subprocess.run(["xdotool","key",key],
+            env={"DISPLAY":os.environ.get("DISPLAY",":1")},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+def codes(caps, evtype):
+    """Return list of code ints for a given event type; handles both (code,info) and plain int."""
+    lst = caps.get(evtype, [])
+    out=[]
+    for item in lst:
+        if isinstance(item, (list, tuple)):
+            out.append(item[0])
+        else:
+            out.append(item)
+    return out
+
+def score_device(d: InputDevice):
+    try:
+        caps = d.capabilities()
+        keys = codes(caps, ecodes.EV_KEY)
+        absx = codes(caps, ecodes.EV_ABS)
+    except Exception:
+        return -999
+    score=0
+    name=(d.name or "").lower()
+    if re.search(r'(x-?box|gamepad|controller|joystick|8bitdo|dualshock|dualsense|pad)', name): score+=40
+    if ecodes.BTN_GAMEPAD in keys: score+=50
+    for btn in (ecodes.BTN_SOUTH, ecodes.BTN_EAST, ecodes.BTN_WEST, ecodes.BTN_NORTH):
+        if btn in keys: score+=10
+    for dpad in (ecodes.BTN_DPAD_LEFT, ecodes.BTN_DPAD_RIGHT, ecodes.BTN_DPAD_UP, ecodes.BTN_DPAD_DOWN):
+        if dpad in keys: score+=15
+    if ecodes.ABS_HAT0X in absx or ecodes.ABS_HAT0Y in absx: score+=20
+    if ecodes.ABS_X in absx or ecodes.ABS_Y in absx: score+=10
+    return score
+
+def pick_device():
+    devs=[InputDevice(p) for p in list_devices()]
+    if not devs: return None
+    pref_path=os.environ.get("PIX_PAD_DEVICE")
+    pref_name=os.environ.get("PIX_PAD_DEVICE_NAME","").lower()
+    if pref_path:
+        for d in devs:
+            if d.path==pref_path: return d
+    if pref_name:
+        for d in devs:
+            if (d.name or "").lower().find(pref_name)>=0: return d
+    best = max(devs, key=score_device)
+    # If best still looks wrong, try to find any device with BTN_SOUTH/DPAD
+    if score_device(best) <= 0:
+        for d in devs:
+            try:
+                k = codes(d.capabilities(), ecodes.EV_KEY)
+                if (ecodes.BTN_SOUTH in k or ecodes.BTN_GAMEPAD in k or
+                    any(b in k for b in (ecodes.BTN_DPAD_LEFT,ecodes.BTN_DPAD_RIGHT,ecodes.BTN_DPAD_UP,ecodes.BTN_DPAD_DOWN))):
+                    return d
+            except Exception:
+                pass
+    return best
+
+dev = pick_device()
+if not dev:
+    log("[padmap] no input device found; exiting"); sys.exit(0)
+
+log(f"[padmap] picked {dev.path} ({dev.name}) score={score_device(dev)}")
+
+last_hat={"x":0,"y":0}
+def handle_dpad_button(code,val):
+    if val!=1: return
+    if code==ecodes.BTN_DPAD_LEFT:  xkey("Left")
+    elif code==ecodes.BTN_DPAD_RIGHT: xkey("Right")
+    elif code==ecodes.BTN_DPAD_UP:    xkey("Up")
+    elif code==ecodes.BTN_DPAD_DOWN:  xkey("Down")
+
+while RUN:
+    try:
+        for e in dev.read_loop():
+            if e.type==ecodes.EV_KEY:
+                if e.code==ecodes.BTN_SOUTH and e.value==1: xkey("q")  # A -> quit
+                elif e.code in (ecodes.BTN_DPAD_LEFT,ecodes.BTN_DPAD_RIGHT,ecodes.BTN_DPAD_UP,ecodes.BTN_DPAD_DOWN):
+                    handle_dpad_button(e.code,e.value)
+            elif e.type==ecodes.EV_ABS:
+                if e.code==ecodes.ABS_HAT0X and e.value!=last_hat["x"]:
+                    last_hat["x"]=e.value
+                    if e.value==-1: xkey("Left")
+                    elif e.value==1: xkey("Right")
+                elif e.code==ecodes.ABS_HAT0Y and e.value!=last_hat["y"]:
+                    last_hat["y"]=e.value
+                    if e.value==-1: xkey("Up")
+                    elif e.value==1: xkey("Down")
+    except OSError:
+        time.sleep(0.05)
+    except KeyboardInterrupt:
+        break
+
+log("[padmap] exit")

@@ -1,0 +1,18 @@
+[
+  { "id": 1, "priority": 1, "action": { "type": "block" },
+    "condition": { "urlFilter": "||doubleclick.net^",
+      "resourceTypes": ["xmlhttprequest","image","script","sub_frame"] } },
+
+  { "id": 2, "priority": 1, "action": { "type": "block" },
+    "condition": { "urlFilter": "||googleads.g.doubleclick.net^",
+      "resourceTypes": ["xmlhttprequest","image","script"] } },
+
+  { "id": 3, "priority": 1, "action": { "type": "block" },
+    "condition": { "regexFilter": "https://www\\.youtube\\.com/api/stats/ads",
+      "resourceTypes": ["xmlhttprequest"] } },
+
+  { "id": 4, "priority": 1, "action": { "type": "block" },
+    "condition": { "regexFilter": "youtubei\\.googleapis\\.com/.*/ad",
+      "resourceTypes": ["xmlhttprequest"] } }
+]
+

@@ -1,0 +1,9 @@
+<system>
+  <name>ngp</name>
+  <fullname>Neo Geo Pocket</fullname>
+  <path>[ROM-FOLDER]/ngp</path>
+  <extension>.7z .ngp .zip .7Z .NGP .ZIP</extension>
+  <command>/opt/retropie/supplementary/runcommand/runcommand.sh 0 _SYS_ ngp %ROM%</command>
+  <platform>ngp</platform>
+  <theme>ngp</theme>
+</system>

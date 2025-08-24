@@ -1,0 +1,9 @@
+<system>
+  <name>psx</name>
+  <fullname>PlayStation</fullname>
+  <path>[ROM-FOLDER]/psx</path>
+  <extension>.cue .cbn .chd .img .iso .m3u .mdf .pbp .toc .z .znx .CUE .CBN .CHD .IMG .ISO .M3U .MDF .PBP .TOC .Z .ZNX</extension>
+  <command>/opt/retropie/supplementary/runcommand/runcommand.sh 0 _SYS_ psx %ROM%</command>
+  <platform>psx</platform>
+  <theme>psx</theme>
+</system>

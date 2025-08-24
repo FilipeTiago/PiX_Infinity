@@ -1,0 +1,9 @@
+<system>
+  <name>gba</name>
+  <fullname>Game Boy Advance</fullname>
+  <path>[ROM-FOLDER]/gba</path>
+  <extension>.7z .gba .zip .7Z .GBA .ZIP</extension>
+  <command>/opt/retropie/supplementary/runcommand/runcommand.sh 0 _SYS_ gba %ROM%</command>
+  <platform>gba</platform>
+  <theme>gba</theme>
+</system>

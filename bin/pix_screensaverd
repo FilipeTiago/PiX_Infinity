@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+import os, time, glob, random, select, signal, subprocess, fcntl
+from evdev import InputDevice, list_devices, ecodes
+
+LOG = open("/tmp/pix_screensaverd.log", "a", buffering=1)
+def log(*a): print(*a, file=LOG, flush=True)
+
+IDLE_SECS = int(os.environ.get("PIX_SAVER_IDLE", "120"))
+DISPLAY   = os.environ.get("PIX_DISPLAY", ":9")
+URLS_FILE = os.environ.get("PIX_SAVER_URLS", os.path.expanduser("~/.config/pix/screensaver.urls"))
+
+FALLBACK_URLS = [
+  "https://www.youtube.com/embed/DtE5Y5VGkjU?autoplay=1&mute=1&loop=1&playlist=DtE5Y5VGkjU&controls=0&rel=0&iv_load_policy=3&modestbranding=1&playsinline=1"
+]
+
+def normalize_url(u: str) -> str:
+    u = u.strip()
+    # Already an embed? ensure loop params and return
+    if "youtube.com/embed/" in u:
+        # ensure loop playlist param = video id
+        try:
+            vid = u.split("/embed/")[1].split("?")[0].split("&")[0]
+        except Exception:
+            vid = ""
+        sep = "&" if "?" in u else "?"
+        extras = f"{sep}autoplay=1&mute=1&loop=1&playlist={vid}&controls=0&rel=0&iv_load_policy=3&modestbranding=1&playsinline=1"
+        return u + ("" if all(k in u for k in ["loop=1", "playlist="]) else extras)
+
+    # youtu.be short
+    if "youtu.be/" in u:
+        vid = u.split("youtu.be/")[1].split("?")[0].split("&")[0]
+        return f"https://www.youtube.com/embed/{vid}?autoplay=1&mute=1&loop=1&playlist={vid}&controls=0&rel=0&iv_load_policy=3&modestbranding=1&playsinline=1"
+
+    # watch?v=
+    if "youtube.com/watch" in u and "v=" in u:
+        # crude but effective extractor
+        vid = u.split("v=")[1].split("&")[0]
+        return f"https://www.youtube.com/embed/{vid}?autoplay=1&mute=1&loop=1&playlist={vid}&controls=0&rel=0&iv_load_policy=3&modestbranding=1&playsinline=1"
+
+    # anything else, pass through
+    return u
+
+def load_urls():
+    path = URLS_FILE
+    urls = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for ln in f:
+                s = ln.strip()
+                if not s or s.startswith("#"):
+                    continue
+                # accept both .urls and .m3u lines
+                if s.lower().startswith("http"):
+                    urls.append(normalize_url(s))
+    except Exception:
+        pass
+    if not urls:
+        return [normalize_url(FALLBACK_URLS[0])]
+    return urls
+
+def list_event_nodes():
+    return sorted(glob.glob("/dev/input/event*"))
+
+def open_devs():
+    devs = []
+    for p in list_event_nodes():
+        try:
+            d = InputDevice(p)
+            # set fd nonblocking
+            flags = fcntl.fcntl(d.fd, fcntl.F_GETFL)
+            fcntl.fcntl(d.fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+            devs.append(d)
+        except Exception as e:
+            log(f"[saver] skip {p}: {e}")
+    return devs
+
+def any_activity(poller, devs, timeout_ms):
+    """Return True if any relevant input event arrives within timeout_ms."""
+    if not devs:
+        time.sleep(timeout_ms/1000.0)
+        return False
+    events = poller.poll(timeout_ms)
+    if not events:
+        return False
+    for fd, _ in events:
+        try:
+            for e in devmap.get(fd, ()).read():
+                # Any key press/release, relative (mouse), absolute (sticks)
+                if e.type in (ecodes.EV_KEY, ecodes.EV_REL, ecodes.EV_ABS):
+                    return True
+        except BlockingIOError:
+            pass
+        except Exception:
+            pass
+    return False
+
+def foreground_busy():
+    """
+    Optional: consider 'busy' if other PIX apps are running (mpv/feh/chromium),
+    but ignore our own saver runner (pix_chromium_saver).
+    """
+    busy_names = ("mpv", "feh", "chromium", "chromium-browser")
+    try:
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit(): continue
+            cpath = f"/proc/{pid}/cmdline"
+            try:
+                with open(cpath, "rb") as f:
+                    cmd = f.read().decode("utf-8", "ignore")
+                if "pix_chromium_saver" in cmd:  # ignore our saver
+                    continue
+                for name in busy_names:
+                    if f"/{name}" in cmd or name in cmd.split("\x00")[:1]:
+                        return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
+
+def start_saver(url):
+    env = os.environ.copy()
+    env["PIX_DISPLAY"] = DISPLAY
+    # Launch without VT
+    return subprocess.Popen(
+        ["/usr/local/bin/pix_chromium_saver", url],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True  # its own process group
+    )
+
+def stop_saver(p):
+    try:
+        os.killpg(p.pid, signal.SIGTERM)
+    except Exception:
+        pass
+    try:
+        p.wait(timeout=3)
+    except Exception:
+        try: os.killpg(p.pid, signal.SIGKILL)
+        except Exception: pass
+
+_pick_deck = []
+def pick_url(urls):
+    import random
+    global _pick_deck
+    if not _pick_deck:
+        _pick_deck = random.sample(urls, len(urls))
+    return _pick_deck.pop()
+
+def main():
+    global devmap
+    urls = load_urls()
+    log(f"[saver] started pid={os.getpid()} idle={IDLE_SECS}s display={DISPLAY}")
+
+    saver = None
+    last_input = time.monotonic()
+    rescan_every = 5.0
+    next_rescan = 0.0
+
+    devs = open_devs()
+    devmap = {d.fd: d for d in devs}
+    poller = select.poll()
+    for d in devs: poller.register(d.fd, select.POLLIN)
+    log(f"[saver] watching {len(devs)} input devices")
+
+    POLL_MS = 50
+    while True:
+        now = time.monotonic()
+        # rescan devices periodically or if we have none
+        if now >= next_rescan or not devs:
+            devs = open_devs()
+            devmap = {d.fd: d for d in devs}
+            poller = select.poll()
+            for d in devs: poller.register(d.fd, select.POLLIN)
+            log(f"[saver] rescan: watching {len(devs)} input devices")
+            next_rescan = now + rescan_every
+
+        # check for input
+        if any_activity(poller, devs, POLL_MS):
+            last_input = time.monotonic()
+            if saver and saver.poll() is None:
+                log("[saver] input -> stopping screensaver")
+                stop_saver(saver)
+                saver = None
+            continue
+
+        # don’t trigger if user is actively using a foreground app
+        if foreground_busy():
+            last_input = time.monotonic()  # reset idle
+            time.sleep(0.2)
+            continue
+
+        # idle -> launch saver
+        idle_for = time.monotonic() - last_input
+        if idle_for >= IDLE_SECS:
+            if not saver or saver.poll() is not None:
+                url = pick_url(urls)
+                log(f"[saver] launching saver on {DISPLAY}: {url}")
+                saver = start_saver(url)
+                # after starting, reset idle so we wait for next true idle window
+                last_input = time.monotonic()
+        else:
+            # small sleep to keep CPU down
+            time.sleep(0.05)
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass

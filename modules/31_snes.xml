@@ -1,0 +1,9 @@
+<system>
+  <name>snes</name>
+  <fullname>Super Nintendo</fullname>
+  <path>[ROM-FOLDER]/snes</path>
+  <extension>.7z .bin .bs .smc .sfc .fig .swc .mgd .zip .7Z .BIN .BS .SMC .SFC .FIG .SWC .MGD .ZIP</extension>
+  <command>/opt/retropie/supplementary/runcommand/runcommand.sh 0 _SYS_ snes %ROM%</command>
+  <platform>snes</platform>
+  <theme>snes</theme>
+</system>

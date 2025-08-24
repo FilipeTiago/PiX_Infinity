@@ -1,0 +1,9 @@
+<system>
+  <name>retropie</name>
+  <fullname>RetroPie</fullname>
+  <path>/home/infinity/RetroPie/retropiemenu</path>
+  <extension>.rp .sh</extension>
+  <command>sudo /home/infinity/RetroPie-Setup/retropie_packages.sh retropiemenu launch %ROM% &lt;/dev/tty &gt;/dev/tty</command>
+  <platform/>
+  <theme>retropie</theme>
+</system>

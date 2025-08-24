@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+import os, sys, json, time, socket, select
+from evdev import InputDevice, list_devices, ecodes
+
+if len(sys.argv) != 2:
+    print("usage: pix_padmap_mpv_radio <mpv-ipc-socket>", file=sys.stderr)
+    sys.exit(2)
+
+SOCK_PATH = sys.argv[1]
+
+def score(d):
+    name = (d.name or "").lower()
+    pts = 0
+    if "x-box" in name or "xbox" in name or "dualshock" in name or "gamepad" in name or "controller" in name or "pad" in name:
+        pts += 100
+    caps = d.capabilities()
+    keys = caps.get(ecodes.EV_KEY, [])
+    if isinstance(keys, list):
+        have = set(k for k, *_ in keys) if keys and isinstance(keys[0], (list, tuple)) else set(keys)
+        for k in (ecodes.BTN_SOUTH, ecodes.BTN_EAST, ecodes.BTN_WEST, ecodes.BTN_NORTH,
+                  ecodes.BTN_START, ecodes.BTN_SELECT):
+            if k in have: pts += 10
+    return pts
+
+def pick_device():
+    devs = [InputDevice(p) for p in list_devices()]
+    if not devs: return None
+    return max(devs, key=score)
+
+def send_mpv(cmd):
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(0.2)
+        s.connect(SOCK_PATH)
+        s.sendall((json.dumps({"command": cmd})+"\n").encode("utf-8"))
+        s.close()
+    except Exception:
+        pass
+
+dev = pick_device()
+if not dev:
+    print("[pad] no input device", file=sys.stderr); sys.exit(0)
+
+dev.grab()  # keep ES from eating the button while radio is up
+try:
+    while True:
+        r,_,_ = select.select([dev.fd], [], [], 0.2)
+        if not r:
+            continue
+        for e in dev.read():
+            if e.type == ecodes.EV_KEY and e.value == 1:  # key down
+                if e.code == ecodes.BTN_SOUTH:   # A (Xbox) / Cross (PS)
+                    send_mpv(["quit"])
+                # (optional) map B to stop as well:
+                # elif e.code == ecodes.BTN_EAST:
+                #     send_mpv(["quit"])
+except KeyboardInterrupt:
+    pass
+finally:
+    try: dev.ungrab()
+    except Exception: pass

@@ -1,0 +1,9 @@
+<system>
+  <name>msx</name>
+  <fullname>MSX</fullname>
+  <path>[ROM-FOLDER]/msx</path>
+  <extension>.cas .rom .mx1 .mx2 .col .dsk .zip .m3u .CAS .ROM .MX1 .MX2 .COL .DSK .ZIP .M3U</extension>
+  <command>/opt/retropie/supplementary/runcommand/runcommand.sh 0 _SYS_ msx %ROM%</command>
+  <platform>msx</platform>
+  <theme>msx</theme>
+</system>

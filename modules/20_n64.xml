@@ -1,0 +1,9 @@
+<system>
+  <name>n64</name>
+  <fullname>Nintendo 64</fullname>
+  <path>[ROM-FOLDER]/n64</path>
+  <extension>.z64 .n64 .v64 .zip .Z64 .N64 .V64 .ZIP</extension>
+  <command>/opt/retropie/supplementary/runcommand/runcommand.sh 0 _SYS_ n64 %ROM%</command>
+  <platform>n64</platform>
+  <theme>n64</theme>
+</system>

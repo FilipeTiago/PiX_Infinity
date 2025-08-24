@@ -1,0 +1,9 @@
+<system>
+  <name>radio</name>
+  <fullname>Radio</fullname>
+  <path>[ROM-FOLDER]/radio</path>
+  <extension>.m3u .M3U</extension>
+  <command>/usr/local/bin/pix_vt_switch 8 /bin/bash -lc '/usr/local/bin/pix_mpv_radio "%ROM%"'</command>
+  <platform>web</platform>
+  <theme>radio</theme>
+</system>

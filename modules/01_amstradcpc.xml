@@ -1,0 +1,9 @@
+<system>
+  <name>amstradcpc</name>
+  <fullname>Amstrad CPC</fullname>
+  <path>[ROM-FOLDER]/amstradcpc</path>
+  <extension>.cdt .cpc .cpr .dsk .m3u .tap .zip .CDT .CPC .CPR .DSK .M3U .TAP .ZIP</extension>
+  <command>/opt/retropie/supplementary/runcommand/runcommand.sh 0 _SYS_ amstradcpc %ROM%</command>
+  <platform>amstradcpc</platform>
+  <theme>amstradcpc</theme>
+</system>

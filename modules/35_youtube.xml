@@ -1,0 +1,9 @@
+<system>
+  <name>youtube</name>
+  <fullname>Youtube</fullname>
+  <path>[ROM-FOLDER]/youtube</path>
+  <extension>.m3u .M3U</extension>
+  <command>/usr/local/bin/pix_vt_switch 8 /bin/bash -lc '/usr/local/bin/pix_chromium_service "%ROM%"'</command>
+  <platform>web</platform>
+  <theme>youtube</theme>
+</system>

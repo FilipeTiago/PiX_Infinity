@@ -1,0 +1,9 @@
+<system>
+  <name>services</name>
+  <fullname>Services</fullname>
+  <path>[ROM-FOLDER]/services</path>
+  <extension>.sh .SH</extension>
+  <command>/usr/local/bin/pix_vt_switch 8 /bin/bash -lc '/usr/local/bin/pix_chromium_service "%ROM%"'</command>
+  <platform>web</platform>
+  <theme>services</theme>
+</system>

@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+# Videos indexer for EmulationStation:
+#  - Folder art via Openverse (optional)
+#  - Per-file snapshots (robust)
+#  - Optional video previews (disabled with --no-video)
+set -euo pipefail
+
+FORCE=0; WITH_FILES=1; DO_FETCH=1; SLEEP=0.4
+LINK_PREVIEWS=0; PREVIEW_SECS=0; MAKE_SNAPSHOTS=0; NO_VIDEO=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --force) FORCE=1 ;;
+    --no-files) WITH_FILES=0 ;;
+    --no-fetch) DO_FETCH=0 ;;
+    --sleep) shift; SLEEP="${1:-0.4}" ;;
+    --link-previews) LINK_PREVIEWS=1 ;;
+    --preview-clips) shift; PREVIEW_SECS="${1:-0}" ;;
+    --snapshots) MAKE_SNAPSHOTS=1 ;;
+    --snapshots-only) MAKE_SNAPSHOTS=1; PREVIEW_SECS=0; LINK_PREVIEWS=0 ;;
+    --no-video) NO_VIDEO=1; PREVIEW_SECS=0; LINK_PREVIEWS=0 ;;
+    *) echo "unknown option: $1" >&2; exit 2 ;;
+  esac; shift
+done
+
+need(){ command -v "$1" >/dev/null 2>&1 || { echo "missing: $1" >&2; exit 3; }; }
+need pix_rom_location; need stat; need date; need find
+if [[ $WITH_FILES -eq 1 || ( $MAKE_SNAPSHOTS -eq 1 && $NO_VIDEO -eq 0 ) ]]; then need ffprobe; fi
+if [[ $MAKE_SNAPSHOTS -eq 1 ]]; then need ffmpeg; fi
+if [[ $DO_FETCH -eq 1 ]]; then need curl; need jq; fi
+command -v ffmpegthumbnailer >/dev/null 2>&1 && HAVE_THUMB=1 || HAVE_THUMB=0
+command -v mpv >/dev/null 2>&1 && HAVE_MPV=1 || HAVE_MPV=0
+command -v convert >/dev/null 2>&1 && HAVE_CONVERT=1 || HAVE_CONVERT=0
+
+ROM_ROOT="$(pix_rom_location videos)"; [[ -d "$ROM_ROOT" ]] || { echo "[pix-videos] ROM root not found" >&2; exit 4; }
+
+ES_DIR="$HOME/.emulationstation"
+LOG_DIR="$ES_DIR/logs"; mkdir -p "$LOG_DIR"
+MEDIA_BASE="$ES_DIR/downloaded_images/videos"
+FOLDERS_DIR="$MEDIA_BASE/folders"
+SNAPS_DIR="$MEDIA_BASE/snapshots"
+PREVIEWS_DIR="$MEDIA_BASE/previews"  # unused when --no-video
+mkdir -p "$FOLDERS_DIR" "$SNAPS_DIR" "$PREVIEWS_DIR"
+
+GAME_LIST="$ROM_ROOT/gamelist.xml"; [[ -f "$GAME_LIST" ]] && cp -f "$GAME_LIST" "$GAME_LIST.bak"
+
+slugify(){ printf '%s' "$1" | sed -e 's#^\./##' -e 's#[/ ]#_#g' -e 's#[^A-Za-z0-9._-]#_#g'; }
+basename_noext(){ b="$(basename "$1")"; printf '%s' "${b%.*}"; }
+xml_escape(){ sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g' -e "s/'/\&apos;/g"; }
+human_size(){ awk '{m=$1/1024/1024; printf("%.1f MiB", m)}'; }
+
+VID_REGEX='.*\.\(mp4\|mkv\|mov\|m4v\|avi\|webm\|mpg\|mpeg\|wmv\|flv\)$'
+has_video_stream(){ ffprobe -v error -select_streams v -show_entries stream=index -of csv=p=0 "$1" 2>/dev/null | grep -q .; }
+
+# ---- snapshots (ffmpegthumbnailer -> ffmpeg -> remux -> mpv -> placeholder) ----
+snap_ffmpegthumb(){ [[ $HAVE_THUMB -eq 1 ]] || return 1; ffmpegthumbnailer -i "$1" -o "$2" -s 0 -t 10 -f >/dev/null 2>&1; }
+snap_ffmpeg(){ ffmpeg -nostdin -hide_banner -y -fflags +genpts+igndts+discardcorrupt -probesize 100M -analyzeduration 100M -i "$1" -vf "thumbnail,scale=640:-2:force_original_aspect_ratio=decrease" -vframes 1 "$2" >>"$LOG_DIR/pix_videos_ffmpeg.log" 2>&1; }
+snap_remux_then_ffmpeg(){
+  real="$1"; out="$2"; tmp="$(mktemp --suffix=.mp4)"; rc=1
+  if ffmpeg -nostdin -hide_banner -y -fflags +genpts+igndts+discardcorrupt -probesize 100M -analyzeduration 100M -i "$real" -c copy -movflags +faststart "$tmp" >>"$LOG_DIR/pix_videos_ffmpeg.log" 2>&1; then
+    if ffmpeg -nostdin -hide_banner -y -i "$tmp" -vf "thumbnail,scale=640:-2:force_original_aspect_ratio=decrease" -vframes 1 "$out" >>"$LOG_DIR/pix_videos_ffmpeg.log" 2>&1; then rc=0; fi
+  fi
+  rm -f "$tmp"; return $rc
+}
+snap_mpv(){
+  [[ $HAVE_MPV -eq 1 ]] || return 1
+  real="$1"; out="$2"; tmpd="$(mktemp -d)"; rc=1
+  mpv --no-config --really-quiet --frames=1 --vo=image --vo-image-format=jpg --vo-image-outdir="$tmpd" --no-audio "$real" >/dev/null 2>&1 && rc=0
+  if [[ $rc -eq 0 ]]; then
+    src="$(ls -1 "$tmpd"/*.jpg 2>/dev/null | head -n1 || true)"
+    if [[ -n "$src" ]]; then mv -f "$src" "$out"; rc=0; else rc=1; fi
+  fi
+  rm -rf "$tmpd"; return $rc
+}
+snap_placeholder(){ [[ $HAVE_CONVERT -eq 1 ]] || return 1; convert -size 640x360 xc:'#1b1b1b' -fill '#f0f0f0' -gravity center -pointsize 18 -annotate +0+0 "No preview available" "$1" >/dev/null 2>&1; }
+
+make_snapshot(){
+  real="$1"; rel="$2"
+  base="$(basename_noext "$rel")"; dirrel="$(dirname "$rel")"; dirslug="$(slugify "$dirrel")"
+  if [[ "$dirslug" == "." ]]; then out="$SNAPS_DIR/${base}.jpg"; else out="$SNAPS_DIR/${dirslug}_${base}.jpg"; fi
+  if [[ $FORCE -eq 0 && -f "$out" && "$out" -nt "$real" ]]; then printf '%s' "$out"; return 0; fi
+  snap_ffmpegthumb "$real" "$out" && { printf '%s' "$out"; return 0; }
+  snap_ffmpeg "$real" "$out" && { printf '%s' "$out"; return 0; }
+  snap_remux_then_ffmpeg "$real" "$out" && { printf '%s' "$out"; return 0; }
+  snap_mpv "$real" "$out" && { printf '%s' "$out"; return 0; }
+  snap_placeholder "$out" && { printf '%s' "$out"; return 0; }
+  return 1
+}
+
+# ---- Openverse (optional folder art) ----
+OV_ENDPOINTS="https://api.openverse.org/v1/images
+https://api.openverse.engineering/v1/images"
+UA="pix-infinity/2.0 (+local)"
+urlencode(){ jq -sRr @uri <<<"$1"; }
+fetch_openverse_thumb(){
+  [[ $DO_FETCH -eq 1 ]] || return 1
+  q="$1"; out="$2"; enc="$(urlencode "$q")"
+  while IFS= read -r base; do
+    [[ -z "$base" ]] && continue
+    data="$(curl -fsSL -H "User-Agent: $UA" "$base/?format=json&page_size=5&q=$enc" 2>/dev/null || true)"
+    if [[ -n "$data" ]]; then
+      url="$(jq -r '.results[] | (.thumbnail // .url) | select(.!=null)' <<<"$data" | head -n1 || true)"
+      [[ -n "$url" ]] && { curl -fsSL -H "User-Agent: $UA" "$url" -o "$out" && return 0; }
+    fi
+  done <<<"$OV_ENDPOINTS"
+  return 1
+}
+
+# ---- Build gamelist ----
+{ echo '<?xml version="1.0"?>'; echo '<gameList>'; } > "$GAME_LIST"
+
+# Folders
+while IFS= read -r -d '' d; do
+  [[ "$d" == "$ROM_ROOT" ]] && continue
+  find "$d" -maxdepth 1 -type f -iregex "$VID_REGEX" -print -quit | grep -q . || continue
+  rel="${d#"$ROM_ROOT"/}"; name="$(basename "$d")"; dirslug="$(slugify "$rel")"
+  folder_img="$FOLDERS_DIR/${dirslug}.jpg"
+  [[ -f "$folder_img" ]] || fetch_openverse_thumb "$name" "$folder_img" || true
+
+  # representative file (for snapshot fallback if no folder art)
+  rep="$(find "$d" -maxdepth 1 -type f -iregex "$VID_REGEX" | sort -V | head -n1)"
+  snap_path=""
+  if [[ -z "$folder_img" || ! -f "$folder_img" ]]; then
+    if [[ -n "${rep:-}" ]]; then
+      relrep="${rep#"$ROM_ROOT"/}"
+      sp="$(make_snapshot "$rep" "$relrep" || true)"; [[ -n "$sp" ]] && snap_path="$sp"
+    fi
+  fi
+
+  count="$(find "$d" -maxdepth 1 -type f -iregex "$VID_REGEX" | wc -l)"
+  path_xml="$(printf '%s' "$d" | xml_escape)"
+  name_xml="$(printf '%s' "$name" | xml_escape)"
+  desc_xml="$(printf '%s video(s) in folder' "$count" | xml_escape)"
+
+  {
+    echo '  <game>'
+    echo "    <path>$path_xml</path>"
+    echo "    <name>$name_xml</name>"
+    if [[ -f "$folder_img" ]]; then
+      fimg="$(printf '%s' "$folder_img" | xml_escape)"
+      echo "    <image>$fimg</image>"
+      echo "    <thumbnail>$fimg</thumbnail>"
+    elif [[ -n "$snap_path" ]]; then
+      s="$(printf '%s' "$snap_path" | xml_escape)"
+      echo "    <image>$s</image>"
+      echo "    <thumbnail>$s</thumbnail>"
+    fi
+    echo "    <desc>$desc_xml</desc>"
+    echo '  </game>'
+  } >> "$GAME_LIST"
+done < <(find "$ROM_ROOT" -type d -print0)
+
+# Files
+if [[ $WITH_FILES -eq 1 ]]; then
+  while IFS= read -r -d '' f; do
+    rel="${f#"$ROM_ROOT"/}"; namefile="$(basename "$f")"; display="${namefile%.*}"
+    path_xml="$(printf '%s' "$f" | xml_escape)"
+    name_xml="$(printf '%s' "$display" | xml_escape)"
+    sz_bytes="$(stat -c %s "$f" 2>/dev/null || echo 0)"; sz_disp="$(printf '%s' "$sz_bytes" | human_size)"
+    desc_xml="$(printf 'Size: %s' "$sz_disp" | xml_escape)"
+    sp=""
+    if [[ $MAKE_SNAPSHOTS -eq 1 ]]; then sp="$(make_snapshot "$f" "$rel" || true)"; fi
+
+    {
+      echo '  <game>'
+      echo "    <path>$path_xml</path>"
+      echo "    <name>$name_xml</name>"
+      if [[ -n "$sp" ]]; then
+        s="$(printf '%s' "$sp" | xml_escape)"
+        echo "    <image>$s</image>"
+        echo "    <thumbnail>$s</thumbnail>"
+      fi
+      echo "    <desc>$desc_xml</desc>"
+      echo '  </game>'
+    } >> "$GAME_LIST"
+  done < <(find "$ROM_ROOT" -type f -iregex "$VID_REGEX" -print0)
+fi
+
+echo '</gameList>' >> "$GAME_LIST"
+echo "[pix-videos] Done (no-video:$NO_VIDEO). ROM root: $ROM_ROOT | snapshots dir: $SNAPS_DIR"

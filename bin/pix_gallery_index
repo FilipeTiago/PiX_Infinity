@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# Build thumbnails + gamelist.xml for the "gallery" EmulationStation system.
+# Media is stored in ~/.emulationstation/downloaded_images/gallery so ES won't show it.
+# Usage:
+#   pix_gallery_index [--force] [--no-folders]
+
+set -euo pipefail
+
+FORCE=0
+INCLUDE_FOLDERS=1
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --force) FORCE=1 ;;
+    --no-folders) INCLUDE_FOLDERS=0 ;;
+    *) echo "unknown option: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+need_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "missing: $1"; exit 3; }; }
+need_cmd pix_rom_location
+# prefer convert/montage, but fall back to magick if needed
+if command -v convert >/dev/null 2>&1; then CNV=convert; else CNV=magick; fi
+if command -v montage >/dev/null 2>&1; then MNT=montage; else MNT="magick montage"; fi
+need_cmd identify
+need_cmd stat
+need_cmd date
+need_cmd find
+need_cmd awk
+need_cmd sed
+
+ROM_ROOT="$(pix_rom_location gallery)"
+[[ -n "$ROM_ROOT" && -d "$ROM_ROOT" ]] || { echo "[pix-gallery] ROM root not found" >&2; exit 4; }
+
+ES_DIR="$HOME/.emulationstation"
+MEDIA_DIR="$ES_DIR/downloaded_images/gallery"
+THUMBS_DIR="$MEDIA_DIR/thumbnails"
+COLLAGE_DIR="$MEDIA_DIR/collages"
+GAME_LIST="$ROM_ROOT/gamelist.xml"
+mkdir -p "$THUMBS_DIR" "$COLLAGE_DIR"
+
+# Backup existing gamelist once
+[[ -f "$GAME_LIST" ]] && cp -f "$GAME_LIST" "$GAME_LIST.bak"
+
+xml_escape() {
+  sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g' -e "s/'/\&apos;/g"
+}
+
+slugify() { printf '%s' "$1" | sed -e 's#^\./##' -e 's#[/ ]#_#g' -e 's#[^A-Za-z0-9._-]#_#g'; }
+
+human_size() {
+  awk '{ mib = $1/1024/1024; printf("%.1f MiB", mib); }'
+}
+
+thumb_for() {
+  local rel="$1" base; base="$(slugify "$rel")"
+  echo "$THUMBS_DIR/${base%.*}.jpg"
+}
+
+collage_for_dir() {
+  local rel="$1" base; base="$(slugify "$rel")"
+  echo "$COLLAGE_DIR/${base}.jpg"
+}
+
+make_thumb() {
+  local src="$1" rel="$2" out; out="$(thumb_for "$rel")"
+  if [[ $FORCE -eq 0 && -f "$out" && "$out" -nt "$src" ]]; then echo "$out"; return; fi
+  mkdir -p "$(dirname "$out")"
+  $CNV "$src" -auto-orient -thumbnail 400x400^ -gravity center -extent 400x400 -quality 85 "$out"
+  echo "$out"
+}
+
+make_collage_for_dir() {
+  local dir="$1" rel="$2" out; out="$(collage_for_dir "$rel")"
+  IFS=$'\n' read -r -d '' -a imgs < <(find "$dir" -maxdepth 1 -type f -iregex '.*\.\(jpg\|jpeg\|png\|bmp\)$' | sort -V | head -n 4 && printf '\0') || true
+  [[ ${#imgs[@]} -gt 0 ]] || return 1
+  if [[ $FORCE -eq 0 && -f "$out" ]]; then
+    local newer=0; for s in "${imgs[@]}"; do [[ "$s" -nt "$out" ]] && newer=1 && break; done
+    [[ $newer -eq 0 ]] && { echo "$out"; return; }
+  fi
+  mkdir -p "$(dirname "$out")"
+  $MNT "${imgs[@]}" -auto-orient -thumbnail 400x400^ -gravity center -extent 400x400 -tile 2x2 -geometry +0+0 "$out"
+  echo "$out"
+}
+
+file_desc() {
+  local f="$1" wh sz mtime w h
+  wh="$(identify -format '%w %h' "$f" 2>/dev/null || echo '0 0')"
+  w="${wh%% *}"; h="${wh##* }"
+  sz="$(stat -c %s "$f" 2>/dev/null || echo 0)"
+  mtime="$(date -d @"$(stat -c %Y "$f")" +%F 2>/dev/null || echo '')"
+  printf 'Resolution: %sx%s · Size: %s · Modified: %s' "$w" "$h" "$(printf '%s' "$sz" | human_size)" "$mtime"
+}
+
+dir_desc() {
+  local d="$1" count first4
+  count="$(find "$d" -type f -iregex '.*\.\(jpg\|jpeg\|png\|bmp\)$' | wc -l)"
+  first4="$(find "$d" -maxdepth 1 -type f -iregex '.*\.\(jpg\|jpeg\|png\|bmp\)$' -printf '%f\n' | sort -V | head -n 4 | paste -sd ', ' -)"
+  printf '%s image%s%s' "$count" "$([[ $count -ne 1 ]] && echo 's')" "$([[ -n "$first4" ]] && printf ' · Top: %s' "$first4")"
+}
+
+# Start gamelist
+{
+  echo '<?xml version="1.0"?>'
+  echo '<gameList>'
+} > "$GAME_LIST"
+
+# Folder entries (optional)
+if [[ $INCLUDE_FOLDERS -eq 1 ]]; then
+  while IFS= read -r -d '' d; do
+    if find "$d" -maxdepth 1 -type f -iregex '.*\.\(jpg\|jpeg\|png\|bmp\)$' | read -r _; then
+      rel="${d#"$ROM_ROOT"/}"
+      collage="$(make_collage_for_dir "$d" "$rel" || true)"
+      name="$(basename "$d")"
+      desc="$(dir_desc "$d" | xml_escape)"
+      path_xml="$(printf '%s' "$d" | xml_escape)"
+      image_xml="$(printf '%s' "${collage:-}" | xml_escape)"
+      thumb_xml="$image_xml"
+      {
+        echo '  <game>'
+        echo "    <path>$path_xml</path>"
+        echo "    <name>$(printf '%s' "$name" | xml_escape)</name>"
+        [[ -n "$image_xml" ]] && echo "    <image>$image_xml</image>"
+        [[ -n "$thumb_xml" ]] && echo "    <thumbnail>$thumb_xml</thumbnail>"
+        echo "    <desc>$desc</desc>"
+        echo '  </game>'
+      } >> "$GAME_LIST"
+    fi
+  done < <(find "$ROM_ROOT" -type d -print0)
+fi
+
+# File entries
+while IFS= read -r -d '' f; do
+  rel="${f#"$ROM_ROOT"/}"
+  name="$(basename "$f")"; name="${name%.*}"
+  thumb="$(make_thumb "$f" "$rel")"
+  desc="$(file_desc "$f" | xml_escape)"
+  path_xml="$(printf '%s' "$f" | xml_escape)"
+  thumb_xml="$(printf '%s' "$thumb" | xml_escape)"
+  {
+    echo '  <game>'
+    echo "    <path>$path_xml</path>"
+    echo "    <name>$(printf '%s' "$name" | xml_escape)</name>"
+    echo "    <image>$path_xml</image>"
+    echo "    <thumbnail>$thumb_xml</thumbnail>"
+    echo "    <desc>$desc</desc>"
+    echo '  </game>'
+  } >> "$GAME_LIST"
+done < <(find "$ROM_ROOT" -type f -iregex '.*\.\(jpg\|jpeg\|png\|bmp\)$' -print0)
+
+echo '</gameList>' >> "$GAME_LIST"
+
+echo "[pix-gallery] Done."
+echo "  ROM root: $ROM_ROOT"
+echo "  Media:    $MEDIA_DIR"
+echo "  Wrote:    $GAME_LIST"

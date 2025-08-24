@@ -1,0 +1,9 @@
+<system>
+  <name>gamegear</name>
+  <fullname>Sega Gamegear</fullname>
+  <path>[ROM-FOLDER]/gamegear</path>
+  <extension>.7z .gg .bin .sms .zip .7Z .GG .BIN .SMS .ZIP</extension>
+  <command>/opt/retropie/supplementary/runcommand/runcommand.sh 0 _SYS_ gamegear %ROM%</command>
+  <platform>gamegear</platform>
+  <theme>gamegear</theme>
+</system>

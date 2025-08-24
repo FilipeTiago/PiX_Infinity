@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Usage: sudo pix_backup [/path/to/backup-dir]
+# Creates: pix-root-YYYYmmdd-HHMM.tar.{zst|gz|tar} and pix-boot-....tar.{zst|gz|tar}
+
+set -euo pipefail
+need(){ command -v "$1" >/dev/null 2>&1 || { echo "[backup] missing: $1" >&2; exit 2; }; }
+need tar
+
+# Choose compressor (zstd preferred)
+COMPRESS_PROG=""
+EXT="tar"
+if command -v zstd >/dev/null 2>&1; then
+  COMPRESS_PROG="zstd -T0 -19"   # multi-core, strong compression
+  EXT="tar.zst"
+elif command -v pigz >/dev/null 2>&1; then
+  COMPRESS_PROG="pigz -9"        # multi-core gzip
+  EXT="tar.gz"
+fi
+
+# Build tar compression flag array (quoted properly)
+TAR_COMP=()
+if [ -n "$COMPRESS_PROG" ]; then
+  TAR_COMP=( -I "$COMPRESS_PROG" )
+fi
+
+DEST="${1:-/home/infinity/backups}"
+TS="$(date +%Y%m%d-%H%M)"
+mkdir -p "$DEST"
+
+# Detect boot mount
+BOOT="/boot/firmware"; [ -d "$BOOT" ] || BOOT="/boot"
+
+ROOT_OUT="$DEST/pix-root-$TS.$EXT"
+BOOT_OUT="$DEST/pix-boot-$TS.$EXT"
+PKGS_OUT="$DEST/pkglist-$TS.txt"
+
+echo "[backup] dest: $DEST"
+echo "[backup] boot: $BOOT"
+echo "[backup] root archive: $ROOT_OUT"
+echo "[backup] boot archive: $BOOT_OUT"
+
+# Package list (useful for rebuilds)
+dpkg --get-selections > "$PKGS_OUT" || true
+
+# Excludes
+EXCLUDES=(
+  --exclude=/proc --exclude=/sys --exclude=/dev --exclude=/run
+  --exclude=/tmp --exclude=/var/tmp --exclude=/lost+found
+  --exclude="$DEST"
+)
+[ -d /media ] && EXCLUDES+=( --exclude=/media/* )
+[ -d /mnt   ] && EXCLUDES+=( --exclude=/mnt/* )
+
+# Root filesystem (stay on this filesystem)
+sudo tar "${TAR_COMP[@]}" -cpf "$ROOT_OUT" \
+  --xattrs --xattrs-include='*' --acls --numeric-owner -p \
+  --one-file-system \
+  "${EXCLUDES[@]}" \
+  /
+
+# Boot partition
+sudo tar -C "$BOOT" "${TAR_COMP[@]}" -cpf "$BOOT_OUT" \
+  --xattrs --xattrs-include='*' --acls --numeric-owner -p \
+  .
+
+sync
+echo "[backup] done:"
+ls -lh "$ROOT_OUT" "$BOOT_OUT" "$PKGS_OUT"

@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Usage: pix_mpv_videos <selected-video>
+set -Eeuo pipefail
+export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+
+sel="${1:-}"
+[ -n "$sel" ] || { echo "[videos] need a file"; exit 2; }
+
+# Resolve absolute path
+sel="$(python3 - <<'PY' "$sel"
+import os,sys; print(os.path.realpath(sys.argv[1]))
+PY
+)"
+
+dir="$(dirname "$sel")"
+
+# Build playlist (sorted) + find index using Python (exclude 00_continue.*)
+m3u="/tmp/pix_mpv_playlist.$$.m3u"
+idx="$(python3 - <<'PY' "$dir" "$sel" "$m3u"
+import os,sys
+d,selected,m3u = sys.argv[1], sys.argv[2], sys.argv[3]
+exts = {'.mp4','.mkv','.mov','.avi','.webm','.mpg','.mpeg'}
+files = []
+for n in sorted(os.listdir(d), key=lambda s: s.lower()):
+    if n.startswith('.'): continue
+    if n.startswith('00_continue.'): continue
+    p = os.path.join(d,n)
+    if os.path.isfile(p) and os.path.splitext(n)[1].lower() in exts:
+        files.append(os.path.realpath(p))
+if not files:
+    print(-1); sys.exit(0)
+try:
+    start = files.index(os.path.realpath(selected))
+except ValueError:
+    start = 0
+with open(m3u,'w',encoding='utf-8') as f:
+    f.write("#EXTM3U\n")
+    for p in files: f.write(p+"\n")
+print(start)
+PY
+)"
+
+if [ "$idx" -lt 0 ]; then
+  echo "[videos] no playable files in: $dir"
+  exit 1
+fi
+
+SOCK="/tmp/mpv-videos-$$.sock"
+RUNLOG="/tmp/pix_mpv.$$.log"
+VT="$(fgconsole 2>/dev/null || echo 8)"
+
+{
+  echo "[videos] dir=$dir"
+  echo "[videos] sel=$sel idx=$idx m3u=$m3u sock=$SOCK"
+  echo "[videos] vt=$VT DISP=:2"
+} >"$RUNLOG"
+
+CLIENT="$(mktemp /tmp/pix_mpv_client.XXXXXX.sh)"
+trap 'rm -f "$CLIENT" "$m3u"' EXIT
+
+cat >"$CLIENT" <<CL
+#!/usr/bin/env bash
+set -Eeuo pipefail
+export DISPLAY=":2"
+
+# --- AUDIO ENV (Pulse/PipeWire) ---
+USR_UID="\$(id -u)"
+export XDG_RUNTIME_DIR="\${XDG_RUNTIME_DIR:-/run/user/\$USR_UID}"
+if [ -S "\$XDG_RUNTIME_DIR/pulse/native" ]; then
+  export PULSE_SERVER="unix:\$XDG_RUNTIME_DIR/pulse/native"
+fi
+export JACK_NO_START_SERVER=1
+
+# Start pad helper (talks to mpv via IPC, maintains 00_continue.mp4)
+/usr/local/bin/pix_padmap_mpvvideos "$SOCK" >/tmp/pix_padmap_mpv.\$\$.log 2>&1 &
+
+# Run mpv
+exec /usr/bin/mpv --ao=pulse --fs --no-terminal --input-conf=/dev/null \
+  --input-ipc-server="$SOCK" --idle=no --keep-open=no --force-window=yes \
+  --save-position-on-quit=yes --resume-playback=yes \
+  --osd-level=1 --loop-playlist=no --playlist-start=$idx --playlist="$m3u"
+CL
+chmod +x "$CLIENT"
+
+# Start a fresh X on :2 (avoids collisions with Gallery's :1)
+xinit "$CLIENT" -- :2 -nolisten tcp vt"$VT" -keeptty -verbose 3 >>"$RUNLOG" 2>&1

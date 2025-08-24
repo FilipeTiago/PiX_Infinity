@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# Minimal Chromium screensaver runner (no VT; safe for systemd --user)
+set -Eeuo pipefail
+
+LOG="/tmp/pix_chromium_saver.$$.log"
+exec > >(stdbuf -oL tee -a "$LOG") 2>&1
+echo "=== pix_chromium_saver $(date -Is) pid=$$ ==="
+
+need(){ command -v "$1" >/dev/null 2>&1 || { echo "[svc] missing: $1" >&2; exit 2; }; }
+need xinit
+
+CHROME_BIN="$(command -v chromium-browser || command -v chromium || true)"
+[ -n "$CHROME_BIN" ] || { echo "[svc] chromium not found"; exit 2; }
+
+RAW="${1:?need URL (or .txt with first non-comment line)}"
+RAW="${RAW//\\ / }"
+
+URL=""
+if [ -f "$RAW" ]; then
+  # first non-comment, trim CR
+  URL="$(grep -vE '^\s*#' "$RAW" | sed -n '1p' | sed 's/\r$//' | xargs || true)"
+else
+  URL="$RAW"
+fi
+[[ "$URL" =~ ^https?:// ]] || { echo "[svc] invalid URL: $URL"; exit 1; }
+
+PROFILE="$HOME/.config/chromium-saver"
+mkdir -p "$PROFILE"
+
+# Which X display to use (default :9)
+DISP="${PIX_DISPLAY:-:9}"
+echo "[svc] URL=$URL  profile=$PROFILE  DISPLAY=$DISP"
+CLIENT="/tmp/pix_chromium_saver_client.$$.sh"
+
+cat > "$CLIENT" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+echo "[client] DISPLAY=$DISPLAY who=$(id -un)" >&2
+
+: "${URL:?missing URL}"
+: "${PROFILE:?missing PROFILE}"
+: "${CHROME_BIN:?missing CHROME_BIN}"
+
+# Keep screen awake & (optionally) hide pointer when idle
+command -v xset >/dev/null 2>&1 && { xset -dpms; xset s off; xset s noblank || true; }
+command -v unclutter-xfixes >/dev/null 2>&1 && unclutter-xfixes -idle 2 -root >/dev/null 2>&1 &
+
+# Tiny WM so fullscreen hints stick
+if command -v matchbox-window-manager >/dev/null 2>&1; then
+  matchbox-window-manager -use_titlebar no >/tmp/pix_mbwm.$$.log 2>&1 &
+  WMPID=$!
+elif command -v openbox >/dev/null 2>&1; then
+  openbox >/tmp/pix_openbox.$$.log 2>&1 &
+  WMPID=$!
+else
+  WMPID=""
+fi
+sleep 0.2
+
+# Ensure an active output
+if command -v xrandr >/dev/null 2>&1; then
+  OUT="$(xrandr | awk '/ connected/{print $1; exit}')"
+  [ -n "$OUT" ] && xrandr --output "$OUT" --auto || true
+fi
+
+# Audio env (even though most saver URLs are muted)
+UID_NOW="$(id -u)"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$UID_NOW}"
+[ -S "$XDG_RUNTIME_DIR/pulse/native" ] && export PULSE_SERVER="unix:$XDG_RUNTIME_DIR/pulse/native"
+[ -S "$XDG_RUNTIME_DIR/bus" ] && export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+
+# Kiosk Chromium (no extensions/profile prompts)
+exec "$CHROME_BIN" \
+  --kiosk "$URL" \
+  --start-fullscreen \
+  --window-position=0,0 \
+  --user-data-dir="$PROFILE" \
+  --no-first-run --no-default-browser-check \
+  --disable-features=TranslateUI \
+  --disable-translate --disable-infobars \
+  --overscroll-history-navigation=0 \
+  --autoplay-policy=no-user-gesture-required \
+  --noerrdialogs --disable-session-crashed-bubble
+EC=$?
+
+[ -n "${WMPID:-}" ] && kill -TERM "$WMPID" >/dev/null 2>&1 || true
+wait >/dev/null 2>&1 || true
+exit "$EC"
+EOF
+chmod +x "$CLIENT"
+
+# Export vars so the client can read them under set -u
+export URL PROFILE CHROME_BIN
+
+# IMPORTANT: no VT, no -keeptty for services
+xinit "$CLIENT" -- "$DISP" -quiet -nolisten tcp || true
+echo "[svc] xinit finished."

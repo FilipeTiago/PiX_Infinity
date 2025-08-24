@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+# Gamepad → Chromium (XTest) mapper (stable cursor)
+# Left stick: mouse (relative, smoothed)
+# Right stick (Y): scroll
+# D-pad Up/Down: Up/Down arrows (works for both button and hat types; with repeat)
+# B: reliable right-click (debounced)
+# A: quit (Alt+F4, or PIX_CHROMIUM_EXIT if set)
+
+import os, time, math, select, traceback
+from evdev import InputDevice, list_devices, ecodes
+from Xlib import X, display, XK
+from Xlib.ext import xtest, xfixes
+
+LOGPATH = f"/tmp/pix_padmap_chromium_xtest.{os.getpid()}.log"
+LOG = open(LOGPATH, "w", buffering=1)
+def log(m): print(m, file=LOG, flush=True)
+
+# ---- X helpers ----
+def open_display():
+    disp_name = os.environ.get("DISPLAY", ":1")
+    dpy = display.Display(disp_name)
+    scr = dpy.screen()
+    log(f"[x] DISPLAY={disp_name} size={scr.width_in_pixels}x{scr.height_in_pixels}")
+    return dpy, scr.root, scr
+
+dpy, root, scr = open_display()
+
+def keycode(name): return dpy.keysym_to_keycode(XK.string_to_keysym(name))
+def tap_key(name):
+    kc = keycode(name)
+    xtest.fake_input(dpy, X.KeyPress, kc)
+    xtest.fake_input(dpy, X.KeyRelease, kc)
+    dpy.sync()
+
+def alt_f4():
+    xtest.fake_input(dpy, X.KeyPress, dpy.keysym_to_keycode(XK.XK_Alt_L))
+    xtest.fake_input(dpy, X.KeyPress, dpy.keysym_to_keycode(XK.XK_F4))
+    xtest.fake_input(dpy, X.KeyRelease, dpy.keysym_to_keycode(XK.XK_F4))
+    xtest.fake_input(dpy, X.KeyRelease, dpy.keysym_to_keycode(XK.XK_Alt_L))
+    dpy.sync()
+
+def send_btn(btn, down):
+    xtest.fake_input(dpy, X.ButtonPress if down else X.ButtonRelease, btn); dpy.sync()
+
+def click(btn):
+    # small nudge to ensure focus/cursor visible before click
+    p = root.query_pointer()._data
+    xtest.fake_input(dpy, X.MotionNotify, x=p["root_x"], y=p["root_y"])
+    try: xfixes.ShowCursor(dpy, root)
+    except Exception: pass
+    xtest.fake_input(dpy, X.ButtonPress, btn)
+    xtest.fake_input(dpy, X.ButtonRelease, btn)
+    dpy.sync()
+
+def robust_click(button, prime=False):
+    """Button click that reliably lands on Chromium/YouTube.
+       prime=True sends a tiny left-click first to ensure focus."""
+    # wake cursor + ensure pointer is at current spot
+    p = root.query_pointer()._data
+    xtest.fake_input(dpy, X.MotionNotify, x=p["root_x"], y=p["root_y"])
+    try: xfixes.ShowCursor(dpy, root)
+    except Exception: pass
+    dpy.sync()
+
+    if prime:
+        # “prime” focus with a micro left-click (some sites ignore Button3 otherwise)
+        xtest.fake_input(dpy, X.ButtonPress, 1); dpy.sync()
+        time.sleep(0.006)
+        xtest.fake_input(dpy, X.ButtonRelease, 1); dpy.sync()
+        time.sleep(0.010)
+
+    xtest.fake_input(dpy, X.ButtonPress, button); dpy.sync()
+    time.sleep(0.015)
+    xtest.fake_input(dpy, X.ButtonRelease, button); dpy.sync()
+
+def move_rel(dx, dy):
+    if not dx and not dy: return
+    p = root.query_pointer()._data
+    nx = max(0, min(scr.width_in_pixels  - 1, p["root_x"] + int(dx)))
+    ny = max(0, min(scr.height_in_pixels - 1, p["root_y"] + int(dy)))
+    xtest.fake_input(dpy, X.MotionNotify, x=nx, y=ny)  # counts as real motion
+    try: xfixes.ShowCursor(dpy, root)
+    except Exception: pass
+    dpy.sync()
+
+def scroll(steps):
+    b = 4 if steps > 0 else 5
+    for _ in range(abs(steps)): click(b)
+
+# ---- evdev helpers ----
+def caps_sets(dev):
+    caps = dev.capabilities(absinfo=False)
+    keys, abss = set(), set()
+    for t, vals in caps.items():
+        if t == ecodes.EV_KEY:
+            for v in vals: keys.add(v if isinstance(v, int) else v[0])
+        elif t == ecodes.EV_ABS:
+            for v in vals: abss.add(v if isinstance(v, int) else v[0])
+    return keys, abss
+
+def score_dev(dev):
+    try:
+        keys, abss = caps_sets(dev)
+        s = 0
+        for need in (ecodes.ABS_X, ecodes.ABS_Y, ecodes.ABS_RX, ecodes.ABS_RY):
+            if need in abss: s += 25
+        for need in (ecodes.BTN_SOUTH, ecodes.BTN_EAST, ecodes.BTN_DPAD_UP, ecodes.BTN_DPAD_DOWN):
+            if need in keys: s += 10
+        return s
+    except Exception:
+        return 0
+
+def pick_device():
+    prefer_path = os.environ.get("PIX_PAD_DEVICE", "").strip()
+    prefer_name = os.environ.get("PIX_PAD_DEVICE_NAME", "").strip().lower()
+    devs = [InputDevice(p) for p in list_devices()]
+    devs = [d for d in devs if "/event" in d.path]
+
+    if prefer_path:
+        for d in devs:
+            if d.path == prefer_path:
+                try: d.grab(); log(f"[pad] using {d.path} ({d.name}) grabbed=True"); return d
+                except Exception: pass
+    if prefer_name:
+        byname = [d for d in devs if prefer_name in (d.name or "").lower()]
+        if byname:
+            d = byname[0]
+            try: d.grab(); log(f"[pad] using {d.path} ({d.name}) grabbed=True"); return d
+            except Exception: pass
+
+    devs.sort(key=score_dev, reverse=True)
+    if not devs: raise RuntimeError("no input devices")
+    d = devs[0]
+    grabbed = False
+    try: d.grab(); grabbed = True
+    except Exception: pass
+    log(f"[pad] using {d.path} ({d.name}) grabbed={grabbed}")
+    return d
+
+# ---- tuning ----
+DEADZONE = float(os.environ.get("PIX_PAD_DEADZONE", "0.30"))  # 0..1
+GAMMA    = float(os.environ.get("PIX_PAD_GAMMA",    "2.2"))
+MAX_VEL  = float(os.environ.get("PIX_PAD_SPEED",    "10.0")) # px/tick
+SMOOTH   = float(os.environ.get("PIX_PAD_SMOOTH",   "0.40")) # 0..1
+RC_STRICT = os.environ.get("PIX_RIGHT_CLICK_MODE", "compat").lower() == "strict"
+
+SCROLL_GAIN = float(os.environ.get("PIX_PAD_SCROLL", "18.0"))  # steps/sec @ full
+EXIT_CMD = os.environ.get("PIX_CHROMIUM_EXIT", "").strip()
+
+# D-pad auto-repeat timings
+REPEAT_DELAY = 0.30   # first repeat after hold (s)
+REPEAT_RATE  = 0.08   # subsequent repeats every (s)
+
+def norm_axis(val, amin, amax, center=None):
+    if center is None: center = (amin + amax) / 2.0
+    span = max(1.0, max(center - amin, amax - center))
+    n = (val - center) / span
+    if abs(n) < DEADZONE: return 0.0
+    s = (abs(n) - DEADZONE) / (1.0 - DEADZONE)
+    s = max(0.0, min(1.0, s))
+    s = math.pow(s, GAMMA)
+    return s if n >= 0 else -s
+
+def main():
+    dev = pick_device()
+
+    # axis ranges
+    ainfo = dev.absinfo
+    ax  = ainfo(ecodes.ABS_X);  ay  = ainfo(ecodes.ABS_Y)
+    arx = ainfo(ecodes.ABS_RX); ary = ainfo(ecodes.ABS_RY)
+
+    nx = ny = nry = 0.0
+    vx = vy = 0.0
+    scroll_acc = 0.0
+
+    # D-pad state (buttons)
+    dpad_up_pressed = False
+    dpad_dn_pressed = False
+    dpad_up_next = 0.0
+    dpad_dn_next = 0.0
+
+    # D-pad state (hat)
+    hat_y = 0
+    hat_y_next = 0.0
+
+    # B-button debounce
+    b_synth_inflight = False
+
+    poller = select.poll()
+    poller.register(dev.fileno(), select.POLLIN)
+
+    last_unhide = 0.0
+    tick_hz = 120.0
+    tick_ms = int(1000.0 / tick_hz)
+
+    while True:
+        evs = poller.poll(tick_ms)
+        now = time.time()
+        had_activity = False
+
+        if evs:
+            try:
+                events = dev.read()
+            except Exception:
+                events = []
+
+            for e in events:
+                if e.type == ecodes.EV_ABS:
+                    if e.code == ecodes.ABS_X and ax:
+                        nx = norm_axis(e.value, ax.min, ax.max, ax.value); had_activity = True
+                    elif e.code == ecodes.ABS_Y and ay:
+                        ny = norm_axis(e.value, ay.min, ay.max, ay.value); had_activity = True
+                    elif e.code == ecodes.ABS_RY and ary:
+                        nry = norm_axis(e.value, ary.min, ary.max, ary.value); had_activity = True
+                    elif e.code == ecodes.ABS_HAT0Y:
+                        v = int(e.value)  # -1 up, 0 neutral, 1 down
+                        if v != hat_y:
+                            hat_y = v
+                            if v == -1:
+                                tap_key("Up"); hat_y_next = now + REPEAT_DELAY
+                            elif v == 1:
+                                tap_key("Down"); hat_y_next = now + REPEAT_DELAY
+                            else:
+                                hat_y_next = 0.0
+                            had_activity = True
+
+                elif e.type == ecodes.EV_KEY:
+                    had_activity = True
+                    # A → quit
+                    if e.code == ecodes.BTN_SOUTH and e.value == 1:
+                        if EXIT_CMD: os.system(EXIT_CMD + " &")
+                        else: alt_f4()
+
+                    # B → robust right-click (debounced: click on press only)
+                    #if e.code == ecodes.BTN_EAST:
+                    #    if e.value == 1 and not b_synth_inflight:
+                    #        click(3); b_synth_inflight = True
+                    #    elif e.value == 0:
+                    #        b_synth_inflight = False
+
+                    # B → robust right-click (press only). In “compat” mode, we prime focus.
+                    if e.code == ecodes.BTN_EAST and e.value == 1:
+                        robust_click(3, prime=not RC_STRICT)
+
+                    # D-pad as buttons (with repeat)
+                    if e.code == ecodes.BTN_DPAD_UP:
+                        if e.value == 1:
+                            dpad_up_pressed = True; tap_key("Up"); dpad_up_next = now + REPEAT_DELAY
+                        elif e.value == 0:
+                            dpad_up_pressed = False
+                    if e.code == ecodes.BTN_DPAD_DOWN:
+                        if e.value == 1:
+                            dpad_dn_pressed = True; tap_key("Down"); dpad_dn_next = now + REPEAT_DELAY
+                        elif e.value == 0:
+                            dpad_dn_pressed = False
+
+        # Smooth cursor + scroll each tick
+        target_vx = nx * MAX_VEL
+        target_vy = ny * MAX_VEL
+        vx = vx * SMOOTH + target_vx * (1.0 - SMOOTH)
+        vy = vy * SMOOTH + target_vy * (1.0 - SMOOTH)
+
+        dx = int(round(vx))
+        dy = int(round(vy))
+        if dx or dy:
+            move_rel(dx, dy)
+            had_activity = True
+
+        steps_per_sec = (-nry) * SCROLL_GAIN  # up on stick = positive (scroll up)
+        scroll_acc += steps_per_sec / tick_hz
+        step = int(scroll_acc)
+        if step:
+            scroll(step)
+            scroll_acc -= step
+            had_activity = True
+
+        # D-pad repeats
+        if dpad_up_pressed and now >= dpad_up_next:
+            tap_key("Up"); dpad_up_next = now + REPEAT_RATE
+        if dpad_dn_pressed and now >= dpad_dn_next:
+            tap_key("Down"); dpad_dn_next = now + REPEAT_RATE
+        if hat_y != 0 and hat_y_next and now >= hat_y_next:
+            tap_key("Up" if hat_y < 0 else "Down")
+            hat_y_next = now + REPEAT_RATE
+
+        # keep cursor shown periodically
+        if had_activity or (now - last_unhide) > 0.5:
+            p = root.query_pointer()._data
+            xtest.fake_input(dpy, X.MotionNotify, x=p["root_x"], y=p["root_y"])
+            try: xfixes.ShowCursor(dpy, root)
+            except Exception: pass
+            dpy.sync()
+            last_unhide = now
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
+    except Exception:
+        traceback.print_exc(file=LOG)
+        LOG.flush()
