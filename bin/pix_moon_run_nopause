@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+CFG="${1:-}"; [[ -z "$CFG" || ! -f "$CFG" ]] && { echo "usage: $0 file.moon" >&2; exit 2; }
+LOG="/tmp/pix-moon-${USER}.log"; : >"$LOG" || true
+val(){ sed -n "s/^$1=//p" "$CFG" | tail -n1; }
+HOST="$(val host)"; APP="$(val app)"; RES="$(val res)"; FPS="$(val fps)"; CODEC="$(val codec)"; BITRATE="$(val bitrate)"; AUDIOCARD="$(val audiocard)"
+case "${RES:-}" in 1080) RESFLAG="-1080";; 2160|4k|4K) RESFLAG="-4k";; *) RESFLAG="-720";; esac
+ARGS=( stream -app "${APP}" "${RESFLAG}" )
+[[ -n "${FPS:-}" ]] && ARGS+=( -fps "${FPS}" )
+[[ -n "${CODEC:-}" ]] && ARGS+=( -codec "${CODEC}" )
+[[ -n "${BITRATE:-}" ]] && ARGS+=( -bitrate "${BITRATE}" )
+ARGS+=( "${HOST}" )
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export SDL_VIDEODRIVER="kmsdrm"
+export SDL_AUDIODRIVER="alsa"
+HDMI_CARD="${HDMI_CARD:-${AUDIOCARD:-vc4hdmi0}}"
+export AUDIODEV="${AUDIODEV:-sysdefault:CARD=${HDMI_CARD}}"
+
+echo "===== $(date) =====" | tee -a "$LOG"
+echo "cfg=${CFG}" | tee -a "$LOG"
+echo "user=${USER} uid=$(id -u) tty=$(tty || true)" | tee -a "$LOG"
+echo "env: SDL_VIDEODRIVER=${SDL_VIDEODRIVER} SDL_AUDIODRIVER=${SDL_AUDIODRIVER} AUDIODEV=${AUDIODEV}" | tee -a "$LOG"
+echo "Launching: /usr/local/bin/moonlight ${ARGS[*]}" | tee -a "$LOG"
+
+set +e
+/usr/local/bin/moonlight "${ARGS[@]}" 2>&1 | tee -a "$LOG"
+RC=${PIPESTATUS[0]}
+echo "Moonlight rc=${RC}" | tee -a "$LOG"
+exit ${RC}

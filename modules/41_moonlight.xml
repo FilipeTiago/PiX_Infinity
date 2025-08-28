@@ -1,0 +1,9 @@
+<system>
+  <name>moonlight</name>
+  <fullname>Moonlight</fullname>
+  <path>[ROM-FOLDER]/moonlight</path>
+  <extension>.moon .MOON</extension>
+  <command>/usr/local/bin/pix_vt_switch 8 /bin/bash -lc 'export XDG_RUNTIME_DIR=/run/user/1000; /usr/local/bin/pix_moon_run "%ROM%"'</command>
+  <platform>pc</platform>
+  <theme>moonlight</theme>
+</system>

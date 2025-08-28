@@ -1,0 +1,373 @@
+#!/usr/bin/env bash
+# pix_image_fetch — fetch or generate artwork for ROM entries
+# Types: logo | music | movie | game | generic | local
+# Outputs a PNG path on stdout. Exits non-zero on failure.
+
+set -Eeuo pipefail
+
+# -------- Defaults --------
+TYPE="generic"
+QUERY=""
+FILE=""
+URL=""
+OUT=""
+SIZE="800x600"   # 4:3 canvas. Change to 512x512 for square covers if you prefer.
+DEBUG="${DEBUG:-0}"
+
+
+# -------- CLI --------
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --type)   TYPE="${2-}"; shift ;;
+    --query)  QUERY="${2-}"; shift ;;
+    --file)   FILE="${2-}"; shift ;;
+    --out)    OUT="${2-}"; shift ;;
+    --size)   SIZE="${2-}"; shift ;;
+    --url)    URL="${2-}"; shift ;;
+    --debug)  DEBUG=1 ;;
+    -h|--help)
+      cat <<EOF
+Usage: $0 --type <logo|music|movie|game|generic|local|youtube> [--query "text"] [--file /path] [--out /path.png] [--size WxH]
+Examples:
+  $0 --type logo   --query "Netflix"
+  $0 --type music  --query "Daft Punk Discovery"
+  $0 --type game   --query "Steam Big Picture"
+  $0 --type movie  --file /path/video.mp4
+  $0 --type local  --file /path/image.jpg
+  $0 --type youtube --url "https://www.youtube.com/@ChannelName"
+  $0 --type youtube --url "https://www.youtube.com/playlist?list=PLxxxx"
+EOF
+      exit 0;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+# -------- Utils --------
+log(){ [[ "$DEBUG" = "1" ]] && echo "[pix_image_fetch] $*" >&2; }
+have(){ command -v "$1" >/dev/null 2>&1; }
+
+# Ensure deps (we’ll skip gracefully when missing)
+need=()
+for b in curl jq ffmpeg ffprobe convert; do have "$b" || need+=("$b"); done
+if ((${#need[@]})); then
+  log "Missing tools: ${need[*]} (some types may fail)."
+fi
+
+# Create output target
+mkout(){ local suffix="${1:-}"; local t; t="$(mktemp -u /tmp/piximg.XXXXXX)"; echo "${t}${suffix}"; }
+
+if [[ -z "$OUT" ]]; then OUT="$(mkout .png)"; fi
+
+# Helpers
+timeout_cmd(){ have timeout && echo "timeout -k 2 12s" || echo ""; }
+
+# URL-encode via jq if available, else naive
+urlenc(){
+  local s="$1"
+  if have jq; then printf '%s' "$s" | jq -sRr @uri
+  else printf '%s' "$s" | sed -e 's/ /%20/g;s/"/%22/g;s/'"'"'/%27/g'
+  fi
+}
+
+download(){
+  local url="$1" dst="$2"
+  have curl || return 1
+  curl -fsSL --retry 2 --connect-timeout 5 "$url" -o "$dst"
+}
+
+# Pad/fit to SIZE canvas, keep aspect, transparent bars
+pad_to_canvas(){ # <in> <out> <WxH>
+  local in="$1" out="$2" size="$3"
+  have convert || { cp -f "$in" "$out"; return 0; }
+  local W="${size%x*}"; local H="${size#*x}"
+  convert "$in" -auto-orient \
+    -resize "${W}x${H}>" \
+    -gravity center -background none -extent "${W}x${H}" \
+    "$out.tmp" && mv "$out.tmp" "$out"
+}
+
+# --- Wikipedia Summary API (lead image / original image) ---
+# returns 0 with image in $2 or nonzero
+wiki_fetch_image(){ # <query> <out>
+  local q="$1" out="$2"
+  have curl || return 1
+  local enc; enc="$(urlenc "$q")"
+  local url="https://en.wikipedia.org/api/rest_v1/page/summary/${enc}"
+  log "Wikipedia query: $q"
+  local json img=""
+  json="$(curl -fsSL --connect-timeout 5 "$url" 2>/dev/null || true)"
+  if [[ -n "$json" && $(printf '%s' "$json" | grep -c '"title"') -gt 0 ]]; then
+    if have jq; then
+      img="$(printf '%s' "$json" | jq -r '.originalimage?.source // .thumbnail?.source // empty')"
+    else
+      img="$(printf '%s' "$json" | sed -n 's/.*"originalimage":{[^}]*"source":"\([^"]*\)".*/\1/p')"
+      [[ -z "$img" ]] && img="$(printf '%s' "$json" | sed -n 's/.*"thumbnail":{[^}]*"source":"\([^"]*\)".*/\1/p')"
+    fi
+    if [[ -n "$img" ]]; then
+      log "Wikipedia image: $img"
+      download "$img" "$out.tmp" || return 1
+      mv "$out.tmp" "$out"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+# --- iTunes Search API for album covers ---
+itunes_album_art(){ # <query> <out>
+  local q="$1" out="$2"
+  have curl || return 1
+  local enc; enc="$(urlenc "$q")"
+  local url="https://itunes.apple.com/search?term=${enc}&entity=album&limit=1"
+  log "iTunes query: $q"
+  local json art=""
+  json="$(curl -fsSL --connect-timeout 5 "$url" 2>/dev/null || true)"
+  if [[ -z "$json" ]]; then return 1; fi
+  if have jq; then
+    art="$(printf '%s' "$json" | jq -r '.results[0].artworkUrl100 // empty')"
+  else
+    art="$(printf '%s' "$json" | sed -n 's/.*"artworkUrl100":"\([^"]*\)".*/\1/p')"
+  fi
+  [[ -z "$art" ]] && return 1
+  # Upscale to 600x600 (Apple convention)
+  art="${art/100x100bb/600x600bb}"
+  download "$art" "$out.tmp" || return 1
+  mv "$out.tmp" "$out"
+}
+
+# --- Fast movie frame grab (no scene scan, with timeout) ---
+grab_movie_frame(){ # <in> <out_png> [size WxH] [seek_seconds]
+  local in="$1" out="$2" size="${3:-$SIZE}" seek_s="${4:-}"
+  have ffmpeg || return 1
+  local W="${size%x*}"; local H="${size#*x}"
+  local dur sstime
+  dur="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$in" 2>/dev/null | cut -d. -f1 || echo 0)"
+  if [[ -z "${seek_s}" || "${seek_s}" -le 0 ]]; then
+    sstime=3; [[ "$dur" -gt 20 ]] && sstime=$(( dur / 6 ))
+  else
+    sstime="$seek_s"
+  fi
+
+  # make sure tmp has a real .png extension so ffmpeg selects image2/png
+  local tmp="${out%.png}.tmp.png"
+
+  local vf="scale='if(gt(a,${W}/${H}),${W},-1)':'if(gt(a,${W}/${H}),-1,${H})':flags=bicubic,\
+pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=#00000000"
+
+  local T; T="$(timeout_cmd)"
+  $T ffmpeg -nostdin -hide_banner -loglevel error -y \
+     -ss "$sstime" -i "$in" -frames:v 1 -an -vf "$vf" "$tmp" \
+  || $T ffmpeg -nostdin -hide_banner -loglevel error -y \
+     -ss 2 -i "$in" -frames:v 1 -an -vf "$vf" "$tmp" || true
+
+  [[ -s "$tmp" ]] && mv "$tmp" "$out"
+  [[ -s "$out" ]]
+}
+
+# Decide if a path looks like a video
+is_video(){
+  local f="${1,,}"
+  [[ "$f" =~ \.(mp4|mkv|avi|mov|webm|flv|m4v)$ ]]
+}
+
+slugify(){ tr '[:upper:]' '[:lower:]' <<<"$1" | sed -E 's/[^a-z0-9+]+/-/g; s/^-+|-+$//g'; }
+
+map_logo_slug(){
+  case "$(tr '[:upper:]' '[:lower:]' <<<"$1")" in
+    "steam big picture"|"steam") echo "steam" ;;
+    "disney+"|"disney plus")     echo "disneyplus" ;;
+    "hbo"|"hbo max"|"max")       echo "hbo" ;;
+    "youtube"|"you tube")        echo "youtube" ;;
+    "netflix")                   echo "netflix" ;;
+    "crunchyroll")               echo "crunchyroll" ;;
+    *) echo "" ;;
+  esac
+}
+
+fetch_logo_simpleicons(){ # <query> <out_png>
+  local q="$1" out="$2"
+  local slug="$(map_logo_slug "$q")"
+  [[ -z "$slug" ]] && slug="$(slugify "$q")"
+  local svg="/tmp/pixlogo-${slug}.svg"
+  curl -fsSL "https://raw.githubusercontent.com/simple-icons/simple-icons/develop/icons/${slug}.svg" -o "$svg" || return 1
+
+  local tmp="${out%.png}.tmp.png"
+  if have rsvg-convert; then
+    rsvg-convert -w 700 -h 700 "$svg" -o "$tmp" || return 1
+  elif have convert; then
+    convert -density 600 "$svg" -background none -resize 700x700 "$tmp" || return 1
+  else
+    return 1
+  fi
+  pad_to_canvas "$tmp" "$out" "$SIZE"
+}
+
+fetch_logo_wikipedia(){ # <query> <out_png>
+  local q="$1" out="$2"
+  have curl || return 1
+  have jq   || return 1
+  local enc; enc="$(urlenc "$q")"
+  local api="https://en.wikipedia.org/w/api.php?action=query&format=json&prop=pageimages&pithumbsize=800&titles=${enc}"
+  local url
+  url="$(curl -fsSL "$api" | jq -r '..|.source? // empty' | head -1)" || return 1
+  [[ -z "$url" || "$url" = "null" ]] && return 1
+  local tmp="${out%.png}.tmp.png"
+  curl -fsSL "$url" -o "$tmp" || return 1
+  pad_to_canvas "$tmp" "$out" "$SIZE"
+}
+
+# Flatten HTML (single line) so sed can catch meta tags reliably
+flatten_html(){ tr '\n' ' ' | tr -s ' '; }
+
+# Extract og:image from a URL (no JS needed)
+og_image_from_url(){ # <url> <out>
+  local u="$1" out="$2"
+  have curl || return 1
+  local html img
+  html="$(curl -fsSL -H 'User-Agent: Mozilla/5.0' "$u" 2>/dev/null | flatten_html)" || return 1
+  # Try double-quoted then single-quoted content
+  img="$(printf '%s' "$html" | sed -n 's/.*<meta[^>]*property="og:image"[^>]*content="\([^"]*\)".*/\1/p')"
+  [[ -z "$img" ]] && img="$(printf '%s' "$html" | sed -n "s/.*<meta[^>]*property='og:image'[^>]*content='\([^']*\)'.*/\1/p")"
+  [[ -z "$img" ]] && return 1
+  download "$img" "$out.tmp" || return 1
+  mv "$out.tmp" "$out"
+}
+
+# Is a YouTube playlist URL?
+is_playlist_url(){
+  local s="${1,,}"
+  # match /playlist?..., or any URL that has ?list=... or &list=...
+  local re='(^|/)playlist([/?]|$)|[?&]list='
+  [[ $s =~ $re ]]
+}
+
+# Is a YouTube channel-ish URL (not a playlist)?
+is_channel_url(){
+  local s="${1,,}"
+  local chanre='^https?://(www\.)?youtube\.com/(@|channel/|c/|user/)'
+  if [[ $s =~ $chanre ]]; then return 0; fi
+  [[ $s =~ ^https?://(www\.)?youtube\.com/ ]] && ! is_playlist_url "$s"
+}
+
+# -------- Main fetch per TYPE --------
+fetch_logo(){
+  fetch_logo_simpleicons "$QUERY" "$OUT" \
+    || fetch_logo_wikipedia "$QUERY logo" "$OUT" \
+    || wiki_fetch_image "$QUERY logo" "$OUT" \
+    || wiki_fetch_image "$QUERY brand" "$OUT" \
+    || wiki_fetch_image "$QUERY" "$OUT" \
+    || return 1
+  pad_to_canvas "$OUT" "$OUT" "$SIZE"
+}
+
+fetch_game(){
+  local q="$QUERY"
+  if [[ "${q,,}" =~ steam ]]; then
+    fetch_logo_simpleicons "steam" "$OUT" \
+      || fetch_logo_wikipedia "Steam" "$OUT" \
+      || wiki_fetch_image "Steam (service)" "$OUT" || true
+  fi
+  [[ -s "$OUT" ]] || wiki_fetch_image "$q video game" "$OUT" || wiki_fetch_image "$q" "$OUT" || return 1
+  pad_to_canvas "$OUT" "$OUT" "$SIZE"
+}
+
+
+fetch_generic(){
+  wiki_fetch_image "$QUERY" "$OUT" || wiki_fetch_image "$QUERY logo" "$OUT" || return 1
+  pad_to_canvas "$OUT" "$OUT" "$SIZE"
+}
+
+fetch_music(){
+  # Prefer album art from iTunes; fallback to Wikipedia
+  itunes_album_art "$QUERY" "$OUT" \
+    || wiki_fetch_image "$QUERY album" "$OUT" \
+    || wiki_fetch_image "$QUERY music" "$OUT" \
+    || return 1
+  pad_to_canvas "$OUT" "$OUT" "$SIZE"
+}
+
+fetch_movie(){
+  if [[ -n "$FILE" && -f "$FILE" && $(is_video "$FILE"; echo $?) -eq 0 ]]; then
+    grab_movie_frame "$FILE" "$OUT" "$SIZE" || return 1
+  else
+    # Fallback: fetch poster/lead image from Wikipedia
+    wiki_fetch_image "$QUERY film" "$OUT" \
+      || wiki_fetch_image "$QUERY movie" "$OUT" \
+      || wiki_fetch_image "$QUERY" "$OUT" || return 1
+    pad_to_canvas "$OUT" "$OUT" "$SIZE"
+  fi
+}
+
+fetch_local(){
+  [[ -n "$FILE" && -f "$FILE" ]] || { echo "local: --file is required" >&2; return 1; }
+  if is_video "$FILE"; then
+    grab_movie_frame "$FILE" "$OUT" "$SIZE" || return 1
+  else
+    pad_to_canvas "$FILE" "$OUT" "$SIZE"
+  fi
+}
+
+fetch_youtube(){
+  [[ -n "${URL:-}" ]] || { echo "youtube: --url required" >&2; return 2; }
+
+  # Playlists: prefer first-video thumbnail (fast & crisp)
+  if is_playlist_url "$URL"; then
+    if have yt-dlp && have jq; then
+      local vid=""
+      vid="$(yt-dlp -J --flat-playlist --playlist-end 1 "$URL" 2>/dev/null \
+              | jq -r '.entries[0].id // empty' || true)"
+      if [[ -n "$vid" ]]; then
+        local thumb="https://img.youtube.com/vi/${vid}/hqdefault.jpg"
+        download "$thumb" "$OUT.tmp" && mv "$OUT.tmp" "$OUT"
+      fi
+    fi
+    # Fallback: page og:image
+    [[ -s "$OUT" ]] || og_image_from_url "$URL" "$OUT" || return 1
+    pad_to_canvas "$OUT" "$OUT" "$SIZE"
+    return 0
+  fi
+
+  # Channels: use page og:image (avatar)
+  if is_channel_url "$URL"; then
+    og_image_from_url "$URL" "$OUT" || return 1
+    pad_to_canvas "$OUT" "$OUT" "$SIZE"
+    return 0
+  fi
+
+  # If unknown form: try og:image anyway
+  og_image_from_url "$URL" "$OUT" || return 1
+  pad_to_canvas "$OUT" "$OUT" "$SIZE"
+}
+
+# -------- Dispatch --------
+case "$TYPE" in
+  logo)
+    [[ -n "$QUERY" ]] || { echo "logo: --query required" >&2; exit 2; }
+    fetch_logo ;;
+  game)
+    [[ -n "$QUERY" ]] || { echo "game: --query required" >&2; exit 2; }
+    fetch_game ;;
+  music)
+    [[ -n "$QUERY" ]] || { echo "music: --query required" >&2; exit 2; }
+    fetch_music ;;
+  movie)
+    [[ -n "$QUERY" || -n "$FILE" ]] || { echo "movie: --query or --file required" >&2; exit 2; }
+    fetch_movie ;;
+  local)
+    fetch_local ;;
+  youtube)
+    fetch_youtube ;;
+  generic|*)
+    [[ -n "$QUERY" ]] || { echo "generic: --query required" >&2; exit 2; }
+    fetch_generic ;;
+esac
+
+# Success: print output path
+if [[ -s "$OUT" ]]; then
+  echo "$OUT"
+  exit 0
+else
+  echo "Failed to produce image" >&2
+  exit 1
+fi

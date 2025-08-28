@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+# pix_gamelist_compiler — build EmulationStation gamelist.xml for a system
+# Systems: --services --youtube --gallery --videos --iptv --music --radio --moonlight (or multiple)
+# Uses: pix_rom_location <system>  and  pix_rom_location <system> --images
+
+set -Eeuo pipefail
+
+DEBUG=0
+ANY_CHANGED=0
+STAMP_FILE=""
+declare -a SYSTEMS=()
+
+log(){ echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+dbg(){ [[ "$DEBUG" = 1 ]] && echo "[$(date '+%Y-%m-%d %H:%M:%S')] [debug] $*"; }
+die(){ echo "ERR: $*" >&2; exit 1; }
+
+# --- CLI ---
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --debug) DEBUG=1 ;;
+    --services|--youtube|--gallery|--videos|--iptv|--music|--radio|--moonlight)
+      SYSTEMS+=("${1#--}") ;;
+    --all) SYSTEMS=(services youtube gallery videos iptv music radio moonlight) ;;
+    --stamp) STAMP_FILE="${2-}"; shift ;;
+    -h|--help)
+      cat <<EOF
+Usage: $(basename "$0") [--debug] [--all] [--services|--youtube|--gallery|--videos|--iptv|--music|--radio|--moonlight ...]
+Builds/refreshes gamelist.xml for the selected systems.
+EOF
+      exit 0 ;;
+    *) die "Unknown arg: $1" ;;
+  esac
+  shift
+done
+[[ ${#SYSTEMS[@]} -eq 0 ]] && SYSTEMS=(services youtube gallery videos iptv music radio moonlight)
+
+# --- helpers ---
+have(){ command -v "$1" >/dev/null 2>&1; }
+rom_dir(){ pix_rom_location "$1"; }
+img_dir(){ pix_rom_location "$1" --images; }
+
+xml_escape(){ sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e "s/\"/\&quot;/g" -e "s/'/\&apos;/g"; }
+
+# relative path from romdir to file -> "./sub/thing.ext"
+rel_path(){
+  local base="$1" full="$2"
+  local rel="${full#$base/}"
+  printf './%s' "$rel"
+}
+
+# pick best image for a ROM file
+pick_image_for_file(){ # <sys> <romdir> <imgdir> <abs_file>
+  local sys="$1" rdir="$2" idir="$3" f="$4"
+  local rel="${f#$rdir/}"
+  local rel_noext="${rel%.*}"
+  local base="$(basename "$rel")"
+  local base_noext="${base%.*}"
+  local parent="$(basename "$(dirname "$rel")")"
+
+  # candidates in priority order
+  declare -a cand=(
+    "$idir/$rel_noext.png"                 # mirrored structure, swap ext
+    "$idir/$base_noext.png"                # flat by basename
+    "$idir/$base.png"                      # services-style (basename WITH ext)
+    "$idir/$parent.png"                    # parent folder image
+  )
+
+  for c in "${cand[@]}"; do
+    [[ -s "$c" ]] && { echo "$c"; return 0; }
+  done
+  return 1
+}
+
+# pick best image for a folder name
+pick_image_for_folder(){ # <imgdir> <folder_name>
+  local idir="$1" name="$2"
+  local c1="$idir/$name.png"
+  [[ -s "$c1" ]] && { echo "$c1"; return 0; }
+  return 1
+}
+
+save_if_changed() { # save_if_changed <target_path>  (reads XML from stdin)
+  local target="$1"
+  local dir; dir="$(dirname "$target")"
+  mkdir -p "$dir"
+  local tmp="$target.tmp"
+
+  # write to tmp first
+  cat > "$tmp"
+
+  # if target doesn't exist or differs, atomically replace
+  if [[ ! -f "$target" ]] || ! cmp -s "$tmp" "$target"; then
+    mv -f "$tmp" "$target"
+    echo "[gamelist] updated: $target"
+    ANY_CHANGED=1
+  else
+    rm -f "$tmp"
+    echo "[gamelist] unchanged: $target"
+  fi
+}
+
+compile_one(){
+  local sys="$1"
+  local rdir idir gl tmp
+  rdir="$(rom_dir "$sys")" || die "romdir not found for $sys"
+  idir="$(img_dir "$sys")" || die "imgdir not found for $sys"
+  [[ -d "$rdir" ]] || { log "[warn] $sys: rom dir $rdir missing; skipping"; return 0; }
+  mkdir -p "$idir"
+
+  gl="$rdir/gamelist.xml"
+  tmp="$gl.tmp"
+
+  dbg "$sys: romdir=$rdir imgdir=$idir"
+
+  save_if_changed "${gl}" < <(
+    echo '<?xml version="1.0"?>'
+    echo '<gameList>'
+
+    # --- files ---
+    # Skip own gamelist, hidden temp files, and any legacy downloaded_images tree under romdir
+    while IFS= read -r -d '' f; do
+      local rel img name
+      rel="$(rel_path "$rdir" "$f")"
+      name="$(basename "$f")"
+      name_disp="${name%.*}"   # drop last extension if present
+
+      # image selection
+      if img="$(pick_image_for_file "$sys" "$rdir" "$idir" "$f")"; then
+        printf '  <game>\n    <path>%s</path>\n    <name>%s</name>\n    <image>%s</image>\n  </game>\n' \
+          "$(printf '%s' "$rel" | xml_escape)" \
+          "$(printf '%s' "$name_disp" | xml_escape)" \
+          "$(printf '%s' "$img" | xml_escape)"
+      else
+        printf '  <game>\n    <path>%s</path>\n    <name>%s</name>\n  </game>\n' \
+          "$(printf '%s' "$rel" | xml_escape)" \
+          "$(printf '%s' "$name_disp" | xml_escape)"
+      fi
+    done < <(find "$rdir" -type f \
+               ! -name 'gamelist.xml' \
+               ! -name 'gamelist.xml.tmp' \
+               ! -path '*/downloaded_images/*' \
+               -print0 | sort -z)
+
+    # --- folders (depth 1 and 2) ---
+    # 1st level
+    while IFS= read -r -d '' d1; do
+      local name img
+      name="$(basename "$d1")"
+      img="$(pick_image_for_folder "$idir" "$name" || true)"
+      echo '  <folder>'
+      printf '    <path>./%s</path>\n' "$(printf '%s' "$name" | xml_escape)"
+      printf '    <name>%s</name>\n' "$(printf '%s' "$name" | xml_escape)"
+      [[ -n "${img:-}" ]] && printf '    <image>%s</image>\n' "$(printf '%s' "$img" | xml_escape)"
+      echo '  </folder>'
+    done < <(find "$rdir" -mindepth 1 -maxdepth 1 -type d ! -name 'downloaded_images' -print0 | sort -z)
+
+    # 2nd level (for iptv/radio channel groups, youtube channels, etc.)
+    while IFS= read -r -d '' d2; do
+      local rel2 name2 img2
+      rel2="${d2#$rdir/}"
+      name2="$(basename "$d2")"
+      img2="$(pick_image_for_folder "$idir" "$name2" || true)"
+      echo '  <folder>'
+      printf '    <path>./%s</path>\n' "$(printf '%s' "$rel2" | xml_escape)"
+      printf '    <name>%s</name>\n' "$(printf '%s' "$name2" | xml_escape)"
+      [[ -n "${img2:-}" ]] && printf '    <image>%s</image>\n' "$(printf '%s' "$img2" | xml_escape)"
+      echo '  </folder>'
+    done < <(find "$rdir" -mindepth 2 -maxdepth 2 -type d \
+               ! -path '*/downloaded_images/*' -print0 | sort -z)
+
+    echo '</gameList>'
+  )
+
+  #mv -f "$tmp" "$gl"
+  log "gamelist updated: $gl"
+}
+
+for s in "${SYSTEMS[@]}"; do
+  compile_one "$s" || true
+done
+
+if [[ "$ANY_CHANGED" -eq 1 && -n "$STAMP_FILE" ]]; then
+  mkdir -p "$(dirname "$STAMP_FILE")"
+  touch "$STAMP_FILE"
+  echo "[gamelist] stamp touched: $STAMP_FILE"
+fi
+
+exit 0

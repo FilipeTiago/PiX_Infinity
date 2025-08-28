@@ -1,0 +1,477 @@
+#!/usr/bin/env bash
+# pix_web_crawler — build/refresh ROMs (and logos) for web-backed systems
+# Systems: --iptv | --radio | --youtube | --moonlight
+# Images are saved under "$(pix_rom_location <sys> --images)" mirroring the ROM folder structure
+# ROM files are created only if missing (use --force to overwrite).
+#
+# Examples:
+#   pix_web_crawler --iptv --debug
+#   pix_web_crawler --radio
+#   pix_web_crawler --youtube
+#   pix_web_crawler --moonlight
+#
+set -Eeuo pipefail
+
+# ---------------- CLI ----------------
+DO_IPTV=0; DO_RADIO=0; DO_YT=0; DO_MOON=0
+DEBUG=0; FORCE=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --iptv) DO_IPTV=1 ;;
+    --radio) DO_RADIO=1 ;;
+    --youtube|--yt) DO_YT=1 ;;
+    --moonlight|--moon) DO_MOON=1 ;;
+    --debug) DEBUG=1 ;;
+    --force) FORCE=1 ;;
+    -h|--help)
+      cat <<EOF
+Usage: $(basename "$0") [--iptv] [--radio] [--youtube] [--moonlight] [--debug] [--force]
+Config files:
+  IPTV:      ~/.config/pix/iptv.txt
+  Radio:     ~/.config/pix/radio.txt
+  YouTube:   ~/.config/pix/youtube.txt
+  Moonlight: ~/.config/pix/moonlight.conf
+EOF
+      exit 0;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+if (( DO_IPTV==0 && DO_RADIO==0 && DO_YT==0 && DO_MOON==0 )); then
+  echo "Pick at least one: --iptv --radio --youtube --moonlight" >&2
+  exit 2
+fi
+
+# ---------------- Utils ----------------
+log(){ echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+dbg(){ [[ "$DEBUG" = "1" ]] && echo "[$(date '+%Y-%m-%d %H:%M:%S')] [debug] $*" >&2; }
+have(){ command -v "$1" >/dev/null 2>&1; }
+safe(){ sed 's#[^A-Za-z0-9._ -]#_#g' <<<"$1"; }
+
+rom_dir(){ pix_rom_location "$1"; }
+img_dir(){ pix_rom_location "$1" --images; }
+
+blank_png() {  # <out> [WxH]
+  local out="$1" size="${2:-800x600}"
+  local W="${size%x*}" H="${size#*x}"
+  if command -v convert >/dev/null 2>&1; then
+    # Use xc:none instead of canvas:none for IM6 compatibility
+    convert -size "${W}x${H}" xc:none "$out"
+  else
+    # super-tiny transparent PNG fallback (1x1); gets padded later if needed
+    base64 -d >"$out" <<'PNG'
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/Up9P1kAAAAASUVORK5CYII=
+PNG
+  fi
+}
+
+
+ensure_art() { # <out_png> <query> <type>
+  local out="$1" query="$2" type="$3"
+  [[ -s "$out" ]] && return 0
+  local PIXIMG_DEBUG=""; [[ "${DEBUG:-0}" -eq 1 ]] && PIXIMG_DEBUG="--debug"
+  /usr/local/bin/indexers/pix_image_fetch --type "$type" --query "$query" --out "$out" $PIXIMG_DEBUG || true
+  [[ -s "$out" ]] || blank_png "$out"
+}
+
+ensure_dir(){ mkdir -p "$1"; }
+write_if_absent(){ # <path> ; reads stdin
+  local p="$1"
+  if [[ -e "$p" && $FORCE -ne 1 ]]; then
+    dbg "skip existing: $p"
+    return 0
+  fi
+  ensure_dir "$(dirname "$p")"
+  cat > "$p.tmp" && mv "$p.tmp" "$p"
+}
+
+# wrapper to your image fetcher
+# call pix_image_fetch, adding --debug only when DEBUG=1
+img_fetch() {
+  local argv=(/usr/local/bin/indexers/pix_image_fetch)
+  [[ "${DEBUG:-0}" -eq 1 ]] && argv+=("--debug")
+  argv+=("$@")
+  "${argv[@]}"
+}
+
+fetch_image(){ # <type> <query-or-url> <out>
+  local t="$1" q="$2" out="$3"
+  [[ -s "$out" && $FORCE -ne 1 ]] && { dbg "img exists: $out"; return 0; }
+  ensure_dir "$(dirname "$out")"
+  case "$t" in
+    youtube)
+      img_fetch --type youtube --url "$q" --out "$out" || true ;;
+    logo|game|music|movie|generic)
+      img_fetch --type "$t" --query "$q" --out "$out" || true ;;
+    *)
+      img_fetch --type generic --query "$q" --out "$out" || true ;;
+  esac
+}
+
+# ---------------- IPTV ----------------
+crawl_iptv() {
+  local cfg="$HOME/.config/pix/iptv.txt"
+  local romdir imgdir
+  romdir="$(pix_rom_location iptv)"
+  imgdir="$(pix_rom_location iptv --images)"
+  mkdir -p "$romdir" "$imgdir"
+
+  # read cfg keys safely (strip inline comments + outer quotes)
+  cfg_get() {
+    local key="$1" val
+    val="$(sed -n "s/^[[:space:]]*$key[[:space:]]*=\(.*\)$/\1/p" "$cfg" | head -1)"
+    val="$(printf '%s' "$val" | sed 's/[[:space:]]*#.*$//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    val="${val%\"}"; val="${val#\"}"; val="${val//\"/}"
+    printf '%s' "$val"
+  }
+
+  local countries genres max playlist
+  countries="$(cfg_get country)"
+  genres="$(cfg_get genre)"
+  max="$(cfg_get max)"; max="${max:-0}"
+  playlist="$(cfg_get playlist)"; playlist="${playlist:-https://iptv-org.github.io/iptv/index.m3u}"
+
+  # normalize lists
+  countries="$(tr ',' ' ' <<<"$countries" | tr -s ' ')"
+  [[ -z "$countries" ]] && countries="ALL"
+
+  # build genre regex if provided
+  local genre_pat=""
+  [[ -n "$genres" ]] && genre_pat="$(sed 's/,/|/g' <<<"$genres")"
+
+  log "[debug] iptv: countries=${countries} genres=${genres} max=${max} src=${playlist}"
+
+  # local sanitizer
+  safe() { sed 's/[^A-Za-z0-9._ -]/_/g' <<<"$1"; }
+
+  local cc url tmp
+  for cc in $countries; do
+    tmp="$(mktemp)"
+    if [[ "$countries" == "ALL" ]]; then
+      url="$playlist"
+    else
+      url="https://iptv-org.github.io/iptv/countries/${cc,,}.m3u"
+    fi
+    log "[debug] iptv: fetch CC=${cc} src=${url}"
+    if ! curl -fsSL "$url" -o "$tmp"; then
+      log "failed to fetch $url"
+      rm -f "$tmp"
+      continue
+    fi
+
+    # AWK -> TSV: name \t group \t logo \t url
+    awk -v IGNORECASE=1 '
+      function trim(s){ sub(/^[ \t\r\n]+/,"",s); sub(/[ \t\r\n]+$/,"",s); return s }
+      function get_attr(line,key,  r){
+        r=""
+        gsub(/\r/,"",line)
+        if (match(line, key"=\"[^\"]*\"")) {
+          r=substr(line,RSTART,RLENGTH)
+          sub("^"key"=\"","",r); sub("\"$","",r)
+        }
+        return r
+      }
+      /^#EXTINF/ {
+        ext=$0
+        name=ext
+        sub(/^.*,/,"",name)
+        name=trim(name)
+        grp=get_attr(ext,"group-title")
+        if (grp=="") grp="Undefined"
+        logo=get_attr(ext,"tvg-logo")
+        getline url
+        url=trim(url)
+        if (url ~ /^#/) next
+        printf("%s\t%s\t%s\t%s\n", name, grp, logo, url)
+      }
+    ' "$tmp" > "$tmp.tsv"
+
+    # iterate TSV, filter genres (if set), enforce max (>0), write rom+logo
+    local count=0
+    while IFS=$'\t' read -r name group logo url; do
+      [[ -z "$name" || -z "$url" ]] && continue
+
+      if [[ -n "$genre_pat" ]]; then
+        echo "$group" | grep -Eiq "$genre_pat" || continue
+      fi
+
+      if [[ "$max" -gt 0 && "$count" -ge "$max" ]]; then
+        break
+      fi
+
+      local safe_name safe_group d di rom png
+      safe_name="$(safe "$name")"
+      safe_group="$(safe "$group")"
+
+      d="$romdir/$cc/$safe_group"
+      di="$imgdir/$cc/$safe_group"
+      mkdir -p "$d" "$di"
+
+      rom="$d/${safe_name}.m3u"
+      png="$di/${safe_name}.png"
+
+      # ROM (always)
+      if [[ ! -s "$rom" ]]; then
+        {
+          echo "#EXTM3U"
+          echo "#EXTINF:-1,$name"
+          echo "$url"
+        } > "$rom"
+        [[ "$DEBUG" -eq 1 ]] && log "[debug] wrote rom: $rom"
+      fi
+
+      # ART: prefer tvg-logo, else ensure via fetcher/placeholder
+      if [[ ! -s "$png" && -n "$logo" ]]; then
+        local timg; timg="$(mktemp)"
+        curl -fsSL "$logo" -o "$timg" 2>/dev/null || true
+        if [[ -s "$timg" ]]; then
+          if command -v convert >/dev/null 2>&1; then
+            convert "$timg" -background none -resize 800x600\> -gravity center -extent 800x600 "$png" 2>/dev/null || cp -f "$timg" "$png"
+          else
+            cp -f "$timg" "$png"
+          fi
+        fi
+        rm -f "$timg"
+      fi
+      ensure_art "$png" "$name logo" "logo"
+      [[ "$DEBUG" -eq 1 ]] && log "[debug] art ready: $png"
+
+      count=$((count+1))
+    done < "$tmp.tsv"
+
+    rm -f "$tmp" "$tmp.tsv"
+  done
+
+  log "IPTV crawl done."
+}
+
+# ---------------- Radio ----------------
+crawl_radio() {
+  local cfg="$HOME/.config/pix/radio.txt"
+  local romdir imgdir
+  romdir="$(pix_rom_location radio)"
+  imgdir="$(pix_rom_location radio --images)"
+  mkdir -p "$romdir" "$imgdir"
+
+  cfg_get() {
+    local key="$1" val
+    val="$(sed -n "s/^[[:space:]]*$key[[:space:]]*=\(.*\)$/\1/p" "$cfg" | head -1)"
+    val="$(printf '%s' "$val" | sed 's/[[:space:]]*#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')"
+    val="${val%\"}"; val="${val#\"}"; val="${val//\"/}"
+    printf '%s' "$val"
+  }
+
+  local countries genres max
+  countries="$(cfg_get country)"; countries="$(tr ',' ' ' <<<"$countries" | tr -s ' ')"
+  genres="$(cfg_get genre)"
+  max="$(cfg_get max)"; max="${max:-0}"
+  [[ -z "$countries" ]] && countries="PT"
+  local genre_pat=""; [[ -n "$genres" ]] && genre_pat="$(sed 's/,/|/g' <<<"$genres")"
+
+  log "[debug] radio: countries=${countries} genres=${genres} max=${max}"
+
+  safe(){ sed 's/[^A-Za-z0-9._ -]/_/g' <<<"$1"; }
+
+  local cc url data name url_res icon tags count d di rom png tmp
+  for cc in $countries; do
+    url="https://de1.api.radio-browser.info/json/stations/bycountrycodeexact/${cc^^}?hidebroken=true&order=clickcount&reverse=true"
+    log "[debug] radio: fetch ${cc} -> ${url}"
+    data="$(curl -fsSL "$url" 2>/dev/null || true)"; [[ -z "$data" ]] && continue
+
+    count=0
+    if command -v jq >/dev/null 2>&1; then
+      echo "$data" | jq -r '.[] | [.name, (.url_resolved // .url // ""), (.favicon // ""), (.tags // "")] | @tsv' | \
+      while IFS=$'\t' read -r name url_res icon tags; do
+        [[ -z "$name" || -z "$url_res" ]] && continue
+        if [[ -n "$genre_pat" ]]; then echo "$tags" | grep -Eiq "$genre_pat" || continue; fi
+        if [[ "$max" -gt 0 && "$count" -ge "$max" ]]; then continue; fi
+
+        d="$romdir/$cc"; di="$imgdir/$cc"; mkdir -p "$d" "$di"
+        rom="$d/$(safe "$name").m3u"
+        png="$di/$(safe "$name").png"
+
+        # ROM (always)
+        if [[ ! -s "$rom" ]]; then
+          printf "#EXTM3U\n#EXTINF:-1,%s\n%s\n" "$name" "$url_res" > "$rom"
+        fi
+
+        # ART: try favicon; if not, ensure placeholder via pix_image_fetch -> blank
+        if [[ ! -s "$png" && -n "$icon" ]]; then
+          tmp="$(mktemp)"; curl -fsSL "$icon" -o "$tmp" 2>/dev/null || true
+          if [[ -s "$tmp" ]]; then
+            if command -v convert >/dev/null 2>&1; then
+              convert "$tmp" -background none -resize 800x600\> -gravity center -extent 800x600 "$png" 2>/dev/null || cp -f "$tmp" "$png"
+            else
+              cp -f "$tmp" "$png"
+            fi
+          fi
+          rm -f "$tmp"
+        fi
+        ensure_art "$png" "$name radio" "logo"
+
+        count=$((count+1))
+      done
+    else
+      # minimal fallback without jq
+      printf '%s' "$data" | sed -n 's/.*"name":"\([^"]*\)".*"url_resolved":"\([^"]*\)".*/\1\t\2/p' | \
+      while IFS=$'\t' read -r name url_res; do
+        [[ -z "$name" || -z "$url_res" ]] && continue
+        if [[ "$max" -gt 0 && "$count" -ge "$max" ]]; then continue; fi
+        d="$romdir/$cc"; di="$imgdir/$cc"; mkdir -p "$d" "$di"
+        rom="$d/$(safe "$name").m3u"
+        png="$di/$(safe "$name").png"
+        [[ -s "$rom" ]] || printf "#EXTM3U\n#EXTINF:-1,%s\n%s\n" "$name" "$url_res" > "$rom"
+        ensure_art "$png" "$name radio" "logo"
+        count=$((count+1))
+      done
+    fi
+  done
+
+  log "Radio crawl done."
+}
+
+# ---------------- YouTube ----------------
+crawl_youtube(){
+  local sys="youtube"
+  local cfg="$HOME/.config/pix/youtube.txt"
+  local rombase; rombase="$(rom_dir "$sys")"
+  local imgbase; imgbase="$(img_dir "$sys")"
+  ensure_dir "$rombase"; ensure_dir "$imgbase"
+
+  have yt-dlp || { log "yt-dlp missing; skip youtube"; return 0; }
+
+  [[ -s "$cfg" ]] || { log "No $cfg; skip youtube"; return 0; }
+
+  while IFS= read -r url; do
+    [[ -z "$url" || "$url" =~ ^# ]] && continue
+
+    # channel title (fallback to handle/path)
+    local ctitle
+    ctitle="$(yt-dlp -J --skip-download "$url" 2>/dev/null | jq -r '.title // empty' || true)"
+    [[ -z "$ctitle" ]] && ctitle="$(basename "${url%/}")"
+    local chan; chan="$(safe "$ctitle")"
+
+    local ch_romdir="$rombase/$chan"
+    local ch_img_png="$imgbase/$chan.png"   # folder art
+    ensure_dir "$ch_romdir"; ensure_dir "$imgbase"
+
+    # channel avatar
+    fetch_image youtube "$url" "$ch_img_png"
+
+    # playlists page
+    local plist_url="${url%/}/playlists"
+    dbg "yt playlists: $plist_url"
+    local json; json="$(yt-dlp -J --flat-playlist "$plist_url" 2>/dev/null || true)"
+    [[ -z "$json" ]] && { log "yt: no playlists for $chan"; continue; }
+
+    # entries of type "url" with a playlist id or URL
+    echo "$json" | jq -r '.entries[] | select(._type=="url") | [.title, (.url // ""), (.id // "")] | @tsv' | \
+      while IFS=$'\t' read -r ptitle purl pid; do
+        [[ -z "$ptitle" ]] && continue
+        local playlist_url=""
+        if [[ "$purl" =~ ^https?:// ]]; then
+          playlist_url="$purl"
+        elif [[ -n "$pid" ]]; then
+          playlist_url="https://www.youtube.com/playlist?list=${pid}&autoplay=1"
+        else
+          continue
+        fi
+
+        local base; base="$(safe "$ptitle")"
+        local rom="$ch_romdir/$base.m3u"
+        write_if_absent "$rom" <<EOF
+#EXTM3U
+#EXTINF:-1,${ptitle}
+${playlist_url}
+EOF
+        # playlist image saved at images/<Channel>/<Playlist>.png
+        local pimg_dir="$imgbase/$chan"
+        ensure_dir "$pimg_dir"
+        fetch_image youtube "$playlist_url" "$pimg_dir/$base.png"
+      done
+
+  done < "$cfg"
+
+  log "YouTube crawl done."
+}
+
+# ---------------- Moonlight ----------------
+crawl_moonlight(){
+  local sys="moonlight"
+  local rombase; rombase="$(rom_dir "$sys")"
+  local imgbase;  imgbase="$(img_dir "$sys")"
+  ensure_dir "$rombase"; ensure_dir "$imgbase"
+
+  local cfg="$HOME/.config/pix/moonlight.conf"
+  [[ -r "$cfg" ]] || { log "No $cfg; skip moonlight"; return 0; }
+  have moonlight || { log "moonlight CLI missing; skip moonlight"; return 0; }
+
+  # config
+  local host app fps width height bitrate codec
+  host="$(sed -n 's/^host=\(.*\)/\1/p'   "$cfg" | head -1)"
+  app="$(sed -n 's/^app=\(.*\)/\1/p'     "$cfg" | head -1 || true)"
+  fps="$(sed -n 's/^fps=\(.*\)/\1/p'     "$cfg" | head -1 || echo 60)"
+  width="$(sed -n 's/^width=\(.*\)/\1/p' "$cfg" | head -1 || echo 1920)"
+  height="$(sed -n 's/^height=\(.*\)/\1/p' "$cfg" | head -1 || echo 1080)"
+  bitrate="$(sed -n 's/^bitrate=\(.*\)/\1/p' "$cfg" | head -1 || echo 20000)"
+  codec="$(sed -n 's/^codec=\(.*\)/\1/p' "$cfg" | head -1 || echo auto)"
+
+  [[ -z "$host" ]] && { log "moonlight.conf missing host=..."; return 0; }
+
+  dbg "moonlight list $host"
+  local raw; raw="$(moonlight list "$host" 2>/dev/null || true)"
+  [[ -z "$raw" ]] && { log "moonlight: no apps listed from $host"; return 0; }
+
+  # lines like: "1. Steam Big Picture"
+  sed -n 's/^[[:space:]]*[0-9]\+\.[[:space:]]*//p' <<<"$raw" | while IFS= read -r appname; do
+    [[ -z "$appname" ]] && continue
+    local sname; sname="$(safe "$appname")"
+    local rom="$rombase/$sname.moon"
+    if [[ ! -e "$rom" || $FORCE -eq 1 ]]; then
+      cat > "$rom.tmp" <<EOF
+host=${host}
+app=${appname}
+fps=${fps}
+bitrate=${bitrate}
+codec=${codec}
+width=${width}
+height=${height}
+EOF
+      mv "$rom.tmp" "$rom"
+      log "moonlight: added ROM $rom"
+    else
+      dbg "moonlight: keep existing $rom"
+    fi
+
+    # ----- artwork -----
+    local img="$imgbase/$sname.png"
+    local q="$appname"
+    # friendlier query for Steam Big Picture, etc.
+    if [[ "${q,,}" =~ steam.*big.*picture ]]; then
+      q="Steam logo"
+    fi
+
+    fetch_image game "$q" "$img"
+
+    # if fetch failed to produce a file, place a transparent placeholder
+    if [[ ! -s "$img" ]]; then
+      dbg "moonlight: no art for '$appname' -> placeholder"
+      blank_png "$img"
+    fi
+
+    # clean any stray temp files the fetcher may have left
+    [[ -e "$imgbase/$sname.tmp.png" ]] && rm -f "$imgbase/$sname.tmp.png"
+    [[ -e "$img.tmp" ]] && rm -f "$img.tmp"
+  done
+
+  log "Moonlight crawl done."
+}
+
+# ---------------- Run ----------------
+(( DO_IPTV ))     && crawl_iptv
+(( DO_RADIO ))    && crawl_radio
+(( DO_YT ))       && crawl_youtube
+(( DO_MOON ))     && crawl_moonlight
+
+exit 0

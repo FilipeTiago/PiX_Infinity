@@ -99,7 +99,7 @@ def foreground_busy():
     Optional: consider 'busy' if other PIX apps are running (mpv/feh/chromium),
     but ignore our own saver runner (pix_chromium_saver).
     """
-    busy_names = ("mpv", "feh", "chromium", "chromium-browser")
+    busy_names = ("mpv", "feh", "chromium", "chromium-browser", "moonlight")
     try:
         for pid in os.listdir("/proc"):
             if not pid.isdigit(): continue

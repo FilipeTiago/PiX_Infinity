@@ -1,37 +1,57 @@
 #!/usr/bin/env bash
 # Print the ROM path for a given EmulationStation system name.
-# Usage: pix_rom_location <system-name>
+# Usage:
+#   pix_rom_location <system-name> [--images]
+# Examples:
+#   pix_rom_location youtube
+#   pix_rom_location youtube --images   -> /.../downloaded_images/youtube
+#
+# Logic for --images:
+#   If the ROM path looks like ".../roms/<system>", the images path becomes
+#   the parent of "roms" plus "downloaded_images/<system>".
+#   e.g. /home/user/RetroPie/roms/youtube -> /home/user/RetroPie/downloaded_images/youtube
+#   Otherwise, we fall back to ~/.emulationstation/downloaded_images/<system>.
+#
 set -euo pipefail
 
 CFG="${ES_CFG:-$HOME/.emulationstation/es_systems.cfg}"
+MODE="roms"   # or "images"
 
-if [[ $# -ne 1 ]]; then
-  echo "usage: $(basename "$0") <system-name>" >&2
+print_usage() {
+  echo "usage: $(basename "$0") <system-name> [--images]" >&2
   exit 2
-fi
+}
+
+[[ $# -lt 1 || $# -gt 2 ]] && print_usage
 
 SYS="$1"
+if [[ "${2-}" == "--images" ]]; then
+  MODE="images"
+elif [[ $# -eq 2 ]]; then
+  print_usage
+fi
 
 if [[ ! -f "$CFG" ]]; then
   echo "error: config not found: $CFG" >&2
   exit 3
 fi
 
-path="$(
+# Extract <path> for the given <name> from es_systems.cfg (very lenient XML scan)
+rom_path="$(
   awk -v sys="$SYS" '
-    BEGIN { inblk=0; sys_ok=0 }
-    /<system[> ]/ { inblk=1; sys_ok=0; next }
-    /<\/system>/   { inblk=0; sys_ok=0; next }
+    BEGIN { inblk=0; hit=0 }
+    /<system[> ]/ { inblk=1; hit=0; next }
+    /<\/system>/   { inblk=0; hit=0; next }
 
     inblk && /<name>/ {
       name = $0
       sub(/^.*<name>[[:space:]]*/, "", name)
       sub(/[[:space:]]*<\/name>.*$/, "", name)
-      if (name == sys) sys_ok=1
+      if (name == sys) hit=1
       next
     }
 
-    inblk && sys_ok && /<path>/ {
+    inblk && hit && /<path>/ {
       p = $0
       sub(/^.*<path>[[:space:]]*/, "", p)
       sub(/[[:space:]]*<\/path>.*$/, "", p)
@@ -41,13 +61,30 @@ path="$(
   ' "$CFG"
 )"
 
-if [[ -z "${path:-}" ]]; then
+if [[ -z "${rom_path:-}" ]]; then
   echo "error: system '$SYS' not found or missing <path> in $CFG" >&2
   exit 4
 fi
 
-# Trim and expand leading ~
-path="$(printf '%s' "$path" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
-path="${path/#\~/$HOME}"
+# Normalize/expand: trim spaces, expand leading ~
+rom_path="$(printf '%s' "$rom_path" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
+rom_path="${rom_path/#\~/$HOME}"
 
-echo "$path"
+if [[ "$MODE" == "roms" ]]; then
+  echo "$rom_path"
+  exit 0
+fi
+
+# MODE=images
+# If rom_path contains /roms/<something>, base is the parent of "roms".
+# Else fall back to ~/.emulationstation/downloaded_images.
+if [[ "$rom_path" =~ /roms(/|$) ]]; then
+  # Strip /roms and everything after it to get the base
+  base="$(sed -E 's#/roms(/.*)?$##' <<<"$rom_path")"
+  images_path="$base/downloaded_images/$SYS"
+else
+  images_path="$HOME/.emulationstation/downloaded_images/$SYS"
+fi
+
+echo "$images_path"
+exit 0

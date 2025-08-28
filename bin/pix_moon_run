@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CFG="${1:-}"
+[ -n "${CFG}" ] && [ -f "${CFG}" ] || { echo "No .moon file"; exit 2; }
+LOG="/tmp/moonlight-$(whoami).log"
+
+# Defaults
+HOST=""; APP=""
+RES_FLAG=""; FPS="60"; CODEC="h264"; BITRATE="20000"
+AUDIODEV="${AUDIODEV:-default}"
+
+# Parse .moon (key=value, simple)
+while IFS='=' read -r k v; do
+  case "$k" in
+    host)   HOST="$v" ;;
+    app)    APP="$v" ;;
+    res)
+      case "$v" in
+        720|-720)   RES_FLAG="-720"  ;;
+        1080|-1080) RES_FLAG="-1080" ;;
+        2160|4k|-4k)RES_FLAG="-4k"   ;;
+        *)          RES_FLAG=""      ;;
+      esac
+      ;;
+    fps)    FPS="$v" ;;
+    codec)  CODEC="$v" ;;
+    bitrate)BITRATE="$v" ;;
+    audio)  AUDIODEV="${v#alsa:}" ;;  # allow audio=alsa:sysdefault:CARD=vc4hdmi0
+  esac
+done < <(grep -E '^(host|app|res|fps|codec|bitrate|audio)=' "$CFG" || true)
+
+[ -n "$HOST" ] && [ -n "$APP" ] || { echo "Missing host/app in $CFG"; exit 3; }
+
+# Environment for KMS + ALSA (don’t touch system audio setup)
+export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-kmsdrm}"
+export SDL_AUDIODRIVER="${SDL_AUDIODRIVER:-alsa}"
+export AUDIODEV
+
+# Make sure we have a user runtime (needed if ES didn’t set it)
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+
+# Run
+{
+  echo "===== $(date) ====="
+  echo "cfg=$CFG"
+  echo "user=$(whoami) uid=$(id -u)"
+  echo "env: SDL_VIDEODRIVER=$SDL_VIDEODRIVER SDL_AUDIODRIVER=$SDL_AUDIODRIVER AUDIODEV=$AUDIODEV"
+  echo -n "Launching: "
+  printf "%q " /usr/local/bin/moonlight stream -app "$APP" ${RES_FLAG:+$RES_FLAG} -fps "$FPS" -codec "$CODEC" -bitrate "$BITRATE" "$HOST"
+  echo
+} | tee -a "$LOG"
+
+# shellcheck disable=SC2086
+/usr/local/bin/moonlight stream -app "$APP" ${RES_FLAG:+$RES_FLAG} -fps "$FPS" -codec "$CODEC" -bitrate "$BITRATE" "$HOST" -quitappafter 2>&1 | tee -a "$LOG"
+RC=${PIPESTATUS[0]}
+
+/usr/local/bin/moonlight quit "$HOST" >/dev/null 2>&1 || true
+echo "Moonlight rc=$RC" | tee -a "$LOG"
+exit $RC

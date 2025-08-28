@@ -1,0 +1,4 @@
+country="PT,US,JP"					# list of countries to extract
+genre=""						# list of genres to retrieve, empty extracts all genres, ex: movies,news,sports
+max=0							# max tv channels to retrieve, 0 means no limit
+playlist=https://iptv-org.github.io/iptv/index.m3u      # source of the iptv channels m3u

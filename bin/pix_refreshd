@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# pix_refreshd — run pix_refresh_library system-by-system only while idle
+# Idle = a process matching $IDLE_PROC is running (default: pix_chromium_saver)
+
+set -Eeuo pipefail
+
+REFRESH="/usr/local/bin/pix_refresh_library"
+
+# -------- defaults --------
+IDLE_PROC="${IDLE_PROC:-pix_chromium_saver}"
+ORDER_DEFAULT="moonlight,iptv,radio,services,music,videos,gallery"
+ORDER="$ORDER_DEFAULT"
+INTERVAL="${INTERVAL:-20}"   # seconds between idle checks
+DEBUG=0
+FORCE=0
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [--order a,b,c] [--idle-proc regex] [--interval sec] [--debug] [--force]
+
+Defaults:
+  --order      $ORDER_DEFAULT
+  --idle-proc  $IDLE_PROC
+  --interval   $INTERVAL
+EOF
+}
+
+# -------- args --------
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --order) ORDER="${2-}"; shift ;;
+    --idle-proc) IDLE_PROC="${2-}"; shift ;;
+    --interval) INTERVAL="${2-}"; shift ;;
+    --debug) DEBUG=1 ;;
+    --force) FORCE=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown arg: $1" >&2; usage; exit 2 ;;
+  esac
+  shift
+done
+
+ts(){ date "+%Y-%m-%d %H:%M:%S"; }
+log(){ echo "[$(ts)] $*"; }
+dbg(){ [[ $DEBUG -eq 1 ]] && log "[debug] $*"; }
+
+# single instance lock
+LOCK="/tmp/pix_refreshd.lock"
+exec 9>"$LOCK"
+if ! flock -n 9; then
+  log "another pix_refreshd is running; exiting"
+  exit 0
+fi
+
+# helpers
+is_idle() {
+  pgrep -f "$IDLE_PROC" >/dev/null 2>&1
+}
+
+busy_refreshing() {
+  pgrep -f -a 'pix_refresh_library|pix_web_crawler|pix_local_crawler|pix_gamelist_compiler' \
+    | grep -vE '(pgrep|grep)' >/dev/null 2>&1
+}
+
+run_one() {
+  local sys="$1"
+  local flags=()
+  ((DEBUG==1)) && flags+=(--debug)
+  ((FORCE==1)) && flags+=(--force)
+  log "starting: $sys"
+  # this call runs to completion; if idle ends mid-run, we still finish this one
+  "$REFRESH" "--$sys" "${flags[@]}" || log "WARN: refresh failed for $sys"
+  log "finished: $sys"
+}
+
+es_reload_or_restart() {
+  # Find the newest EmulationStation process and its TTY (e.g. tty1)
+  local pid tty vt
+  pid="$(pgrep -n emulationstation || true)"
+  [[ -z "$pid" ]] && { echo "[es] not running, nothing to restart"; return 0; }
+
+  tty="$(ps -o tty= -p "$pid" | tr -d ' ')"
+  vt="${tty#tty}"
+  echo "[es] pid=$pid tty=$tty vt=$vt"
+
+  # 1) Try a gentle poke (harmless if unsupported)
+  kill -USR1 "$pid" 2>/dev/null || true
+  sleep 0.5
+
+  # 2) Graceful terminate, then wait
+  kill -TERM "$pid" 2>/dev/null || true
+  for _ in $(seq 1 50); do
+    sleep 0.1
+    kill -0 "$pid" 2>/dev/null || break
+  done
+  # If it’s still around, force it
+  kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+  sleep 0.2
+
+  # 3) Relaunch ES on the same VT
+  if command -v /usr/local/bin/pix_vt_switch >/dev/null 2>&1; then
+    /usr/local/bin/pix_vt_switch "$vt" /bin/bash -lc '/opt/retropie/supplementary/emulationstation/emulationstation.sh --no-splash'
+  else
+    chvt "$vt" 2>/dev/null || true
+    openvt -c "$vt" -s -w -- /bin/bash -lc '/opt/retropie/supplementary/emulationstation/emulationstation.sh --no-splash' \
+      || /opt/retropie/supplementary/emulationstation/emulationstation.sh --no-splash &
+  fi
+}
+
+IFS=',' read -r -a QUEUE <<<"$ORDER"
+
+log "pix_refreshd ready (idle proc='$IDLE_PROC', interval=${INTERVAL}s, order=${ORDER})"
+
+while true; do
+  if is_idle; then
+    dbg "idle detected"
+    # don’t double-start if something is already running
+    if busy_refreshing; then
+      dbg "already refreshing; waiting…"
+      sleep "$INTERVAL"
+      continue
+    fi
+    # walk the queue; re-check idleness between systems
+    for sys in "${QUEUE[@]}"; do
+      if ! is_idle; then
+        log "idle ended; pausing before next system"
+        break
+      fi
+      run_one "$sys"
+      # short breather between systems
+      sleep 2
+    done
+    # after a full pass, wait for next idle window
+    if [ -f /tmp/pix_es_needs_reload ]; then
+      # Optional: only restart if screensaver (idle) is active
+      if pgrep -f /usr/local/bin/pix_chromium_saver >/dev/null 2>&1; then
+         echo "[daemon] changes detected + idle -> restarting EmulationStation"
+         es_reload_or_restart
+      else
+        echo "[daemon] changes detected but not idle; deferring ES restart"
+      fi
+      rm -f /tmp/pix_es_needs_reload
+    fi
+
+    sleep "$INTERVAL"
+  else
+    dbg "not idle"
+    sleep "$INTERVAL"
+  fi
+done

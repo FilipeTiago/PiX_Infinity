@@ -1,0 +1,3 @@
+country="PT,US,JP"
+genre="dance,music,news"
+max=0

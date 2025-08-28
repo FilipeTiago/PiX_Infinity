@@ -1,0 +1,278 @@
+#!/usr/bin/env bash
+# pix_local_crawler — fetch/generate artwork for local systems
+# Systems: --services --music --videos --gallery   (default: all)
+# Images are stored in $(pix_rom_location <sys> --images)
+# Uses /usr/local/bin/indexers/pix_image_fetch
+
+set -Eeuo pipefail
+
+# ---------- CLI ----------
+DEBUG=0
+FORCE=0
+DO_SERVICES=0
+DO_MUSIC=0
+DO_VIDEOS=0
+DO_GALLERY=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --debug) DEBUG=1 ;;
+    --force) FORCE=1 ;;
+    --services) DO_SERVICES=1 ;;
+    --music) DO_MUSIC=1 ;;
+    --videos) DO_VIDEOS=1 ;;
+    --gallery) DO_GALLERY=1 ;;
+    -h|--help)
+      cat <<EOF
+Usage: $(basename "$0") [--debug] [--force] [--services] [--music] [--videos] [--gallery]
+If no system flags are provided, all are processed.
+EOF
+      exit 0;;
+    *) echo "Unknown arg: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+if [[ $DO_SERVICES -eq 0 && $DO_MUSIC -eq 0 && $DO_VIDEOS -eq 0 && $DO_GALLERY -eq 0 ]]; then
+  DO_SERVICES=1; DO_MUSIC=1; DO_VIDEOS=1; DO_GALLERY=1
+fi
+
+# ---------- Utils ----------
+ts(){ date "+%Y-%m-%d %H:%M:%S"; }
+log(){ echo "[$(ts)] $*"; }
+dbg(){ [[ "$DEBUG" = 1 ]] && echo "[$(ts)] [debug] $*"; }
+have(){ command -v "$1" >/dev/null 2>&1; }
+
+safe_name(){ sed 's/[^A-Za-z0-9._ -]/_/g' <<<"$1"; }
+rel_slug(){ # turn a path relative to romdir into a safe slug for filenames
+  # slashes -> __ ; then sanitize
+  sed 's#/#__#g' <<<"$(safe_name "$1")"
+}
+
+placeholder_png(){ # <out> [WxH]
+  local out="$1" size="${2:-800x600}"
+  local W="${size%x*}"; local H="${size#*x}"
+  if have convert; then
+    convert -size "${W}x${H}" canvas:none "$out.tmp" && mv "$out.tmp" "$out"
+  else
+    # 1x1 transparent PNG minimal fallback
+    printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc``\x00\x00\x00\x02\x00\x01\xe2!\xbc3\x00\x00\x00\x00IEND\xaeB`\x82' > "$out"
+  fi
+}
+
+# wrapper to call pix_image_fetch and add --debug only when DEBUG=1
+img_fetch(){
+  local argv=(/usr/local/bin/indexers/pix_image_fetch)
+  [[ "${DEBUG}" = "1" ]] && argv+=("--debug")
+  argv+=("$@")
+  "${argv[@]}"
+}
+
+images_dir(){ pix_rom_location "$1" --images; }
+roms_dir(){ pix_rom_location "$1"; }
+
+# Ensure helper exists
+[[ -x /usr/local/bin/indexers/pix_image_fetch ]] || {
+  echo "pix_image_fetch not found at /usr/local/bin/indexers/pix_image_fetch" >&2
+  exit 3
+}
+
+# ---------- Services ----------
+do_services(){
+  local romdir imgdir
+  romdir="$(pix_rom_location services)"
+  imgdir="$(pix_rom_location services --images)"
+  mkdir -p "$imgdir"
+
+  log "Indexing: services"
+  log "[debug] services: romdir=$romdir imgdir=$imgdir"
+
+  shopt -s nullglob
+  for f in "$romdir"/*.sh; do
+    local base name png
+    base="$(basename "$f")"
+    name="${base%.*}"                            # twitch.sh -> twitch
+    png="$imgdir/${base}.png"                    # keep .sh in the png name as you had
+
+    if [[ ! -s "$png" || "$FORCE" -eq 1 ]]; then
+      log "[debug] services: fetch logo for '$name' -> $png"
+      /usr/local/bin/indexers/pix_image_fetch --type logo --query "$name" --out "$png" ${DEBUG:+--debug} || true
+    fi
+  done
+  # remove legacy artifacts from older runs
+  rm -f "$imgdir"/*.tmp.png 2>/dev/null || true
+
+  log "Local crawl done."
+}
+
+# ---------- Music ----------
+do_music(){
+  local sys=music
+  local romdir; romdir="$(roms_dir "$sys")"
+  local imgdir; imgdir="$(images_dir "$sys")"
+  [[ -d "$romdir" ]] || { dbg "music: romdir not found ($romdir), skipping"; return; }
+  mkdir -p "$imgdir"
+
+  dbg "music: romdir=$romdir imgdir=$imgdir"
+
+  # per-folder cover (tracks will reference folder image later in gamelist)
+  while IFS= read -r -d '' d; do
+    local name out
+    name="$(basename "$d")"
+    out="$imgdir/$name.png"
+
+    if [[ -s "$out" && $FORCE -eq 0 ]]; then
+      dbg "music: keep $out"
+      continue
+    fi
+
+    dbg "music: fetch album art for '$name' -> $out"
+    if ! img_fetch --type music --query "$name" --out "$out"; then
+      dbg "music: art fetch failed for '$name' -> placeholder"
+      placeholder_png "$out"
+    fi
+  done < <(find "$romdir" -mindepth 1 -maxdepth 1 -type d -print0)
+}
+
+# ---------- Videos ----------
+do_videos(){
+  local sys=videos
+  local romdir; romdir="$(roms_dir "$sys")"
+  local imgdir; imgdir="$(images_dir "$sys")"
+  [[ -d "$romdir" ]] || { dbg "videos: romdir not found ($romdir), skipping"; return; }
+  mkdir -p "$imgdir"
+
+  dbg "videos: romdir=$romdir imgdir=$imgdir"
+
+  # --- Folder posters (mirror just the folder name under images_dir) ---
+  while IFS= read -r -d '' d; do
+    local drel out
+    drel="${d#"$romdir/"}"             # e.g. Japan
+    out="$imgdir/${drel%/}.png"        # ~/.emulationstation/.../videos/Japan.png
+    mkdir -p "$(dirname "$out")"
+    if [[ -s "$out" && $FORCE -eq 0 ]]; then
+      dbg "videos: keep $out"
+      continue
+    fi
+    dbg "videos: fetch poster for '$drel' -> $out"
+    if ! img_fetch --type movie --query "$drel" --out "$out"; then
+      dbg "videos: poster fetch failed for '$drel' -> placeholder"
+      placeholder_png "$out"
+    fi
+  done < <(find "$romdir" -mindepth 1 -maxdepth 1 -type d -print0)
+
+  # --- Per-file thumbnails (mirror full relpath under images_dir) ---
+  while IFS= read -r -d '' v; do
+    local rel out
+    rel="${v#"$romdir/"}"              # e.g. Japan/VID-20221023-WA0058.mp4
+    out="$imgdir/${rel%.*}.png"        # ~/.emulationstation/.../videos/Japan/VID-...png
+    mkdir -p "$(dirname "$out")"
+    if [[ -s "$out" && $FORCE -eq 0 ]]; then
+      dbg "videos: keep $out"
+      continue
+    fi
+    dbg "videos: frame thumb for '$rel' -> $out"
+    if ! img_fetch --type movie --file "$v" --out "$out"; then
+      dbg "videos: frame grab failed for '$rel' -> placeholder"
+      placeholder_png "$out"
+    fi
+  done < <(
+    find "$romdir" -maxdepth 2 -type f \
+      \( -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.avi' -o -iname '*.mov' -o -iname '*.webm' -o -iname '*.m4v' \) -print0
+  )
+}
+
+
+# ---------- Gallery ----------
+make_collage(){
+  # <out> <img1> <img2> <img3> <img4>  (tile each to 400x300 -> 800x600)
+  local out="$1"; shift
+  local imgs=("$@")
+  if ! have convert || ! have montage; then
+    placeholder_png "$out"
+    return
+  fi
+  # prep tiles
+  local tiles=() t
+  for src in "${imgs[@]}"; do
+    t="$(mktemp --suffix=.png)"
+    convert "$src" -auto-orient -resize 400x300\> -gravity center -background none -extent 400x300 "$t"
+    tiles+=("$t")
+  done
+  montage "${tiles[@]}" -tile 2x2 -geometry +0+0 -background none "$out.tmp" || true
+  rm -f "${tiles[@]}"
+  if [[ -s "$out.tmp" ]]; then
+    mv "$out.tmp" "$out"
+  else
+    placeholder_png "$out"
+  fi
+}
+
+do_gallery(){
+  local sys=gallery
+  local romdir; romdir="$(roms_dir "$sys")"
+  local imgdir; imgdir="$(images_dir "$sys")"
+  [[ -d "$romdir" ]] || { dbg "gallery: romdir not found ($romdir), skipping"; return; }
+
+  dbg "gallery: romdir=$romdir imgdir=$imgdir"
+
+  # --- Folder collages (mirror the folder path under images_dir) ---
+  while IFS= read -r -d '' d; do
+    local drel out
+    drel="${d#"$romdir/"}"                   # e.g. Cats
+    out="$imgdir/${drel%/}.png"              # ~/.emulationstation/.../gallery/Cats.png
+    mkdir -p "$(dirname "$out")"
+
+    if [[ -s "$out" && $FORCE -eq 0 ]]; then
+      dbg "gallery: keep $out"
+      continue
+    fi
+
+    # pick up to 4 images inside folder
+    mapfile -d '' -t pics < <(
+      find "$d" -maxdepth 1 -type f \
+        \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \) \
+        -print0 | head -z -n 4 || true
+    )
+
+    if ((${#pics[@]}==0)); then
+      dbg "gallery: no images in '$drel' -> placeholder"
+      placeholder_png "$out"
+    else
+      while ((${#pics[@]}<4)); do pics+=("${pics[-1]}"); done
+      dbg "gallery: collage for '$drel' -> $out"
+      make_collage "$out" "${pics[@]:0:4}"
+    fi
+  done < <(find "$romdir" -mindepth 1 -maxdepth 1 -type d -print0)
+
+  # --- Per-image thumbnails (mirror the *file* relpath under images_dir) ---
+  while IFS= read -r -d '' img; do
+    local rel out
+    rel="${img#"$romdir/"}"                  # e.g. Cats/IMG-20221030-WA0086.jpg
+    out="$imgdir/${rel%.*}.png"              # ~/.emulationstation/.../gallery/Cats/IMG-20221030-WA0086.png
+    mkdir -p "$(dirname "$out")"
+
+    if [[ -s "$out" && $FORCE -eq 0 ]]; then
+      dbg "gallery: keep $out"
+      continue
+    fi
+
+    dbg "gallery: thumb for '$rel' -> $out"
+    if ! img_fetch --type local --file "$img" --out "$out"; then
+      dbg "gallery: thumb failed for '$rel' -> placeholder"
+      placeholder_png "$out"
+    fi
+  done < <(
+    find "$romdir" -maxdepth 2 -type f \
+      \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \) -print0
+  )
+}
+
+# ---------- Main ----------
+log "Start local crawl (debug=$DEBUG force=$FORCE)";
+
+[[ $DO_SERVICES -eq 1 ]] && { log "Indexing: services"; do_services; }
+[[ $DO_MUSIC    -eq 1 ]] && { log "Indexing: music";    do_music; }
+[[ $DO_VIDEOS   -eq 1 ]] && { log "Indexing: videos";   do_videos; }
+[[ $DO_GALLERY  -eq 1 ]] && { log "Indexing: gallery";  do_gallery; }
+
+log "Local crawl done."

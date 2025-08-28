@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -u
+LOG=/tmp/moonlight-es-debug.log
+{
+  echo "===== $(date) ====="
+  echo "argv: $*"
+  echo "user=$USER uid=$(id -u) tty=$(tty || true)"
+  echo "env: DISPLAY=${DISPLAY-} WAYLAND_DISPLAY=${WAYLAND_DISPLAY-} XDG_SESSION_TYPE=${XDG_SESSION_TYPE-} PATH=$PATH"
+} >>"$LOG" 2>&1
+
+ROM="${1:-}"
+if [[ -z "$ROM" || ! -f "$ROM" ]]; then
+  echo "ERROR: ROM not found: '$ROM'" >>"$LOG"; exit 1
+fi
+
+# Audio backend for both paths
+if pactl info >/dev/null 2>&1; then ADA=pulse; else ADA=alsa; fi
+
+# If a desktop is present (X11), stream in a window
+if [[ -n "${DISPLAY-}" && -z "${FORCE_KMS-}" ]]; then
+  echo "Desktop detected (X11). SDL_VIDEODRIVER=x11" >>"$LOG"
+  SDL_AUDIODRIVER="$ADA" SDL_VIDEODRIVER=x11 \
+    /usr/local/bin/moonlight-launch "$ROM" >>"$LOG" 2>&1
+  exit $?
+fi
+
+# KMS/GBM path for ES on tty
+CMD='SDL_VIDEODRIVER=kmsdrm SDL_KMSDRM_FORCE_BACKBUFFER=1 SDL_AUDIODRIVER='"$ADA"' XDG_RUNTIME_DIR=/run/user/'"$(id -u)"' /usr/local/bin/moonlight-launch '"$(printf '%q' "$ROM")"
+echo "No desktop detected. Using KMS/GBM path." >>"$LOG"
+echo "Audio: $ADA" >>"$LOG"
+
+if [[ -x /usr/local/bin/pix_vt_switch ]]; then
+  echo "Using pix_vt_switch to run on VT 8" >>"$LOG"
+  /usr/local/bin/pix_vt_switch 8 /bin/bash --noprofile --norc -c "$CMD" >>"$LOG" 2>&1
+  rc=$?
+  echo "Moonlight exit code: $rc" >>"$LOG"
+  exit $rc
+elif command -v openvt >/dev/null 2>&1; then
+  echo "Using openvt -c 8" >>"$LOG"
+  openvt -f -c 8 -s -w -- /bin/bash --noprofile --norc -c "$CMD" >>"$LOG" 2>&1
+  rc=$?
+  echo "Moonlight exit code (openvt): $rc" >>"$LOG"
+  exit $rc
+fi
+
+echo "No VT helper; running on current VT" >>"$LOG"
+exec /bin/bash --noprofile --norc -c "$CMD" >>"$LOG" 2>&1

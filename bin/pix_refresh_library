@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# pix_refresh_library — run crawlers + rebuild gamelists
+# Systems: moonlight iptv radio youtube services music videos gallery
+# Usage:
+#   pix_refresh_library --all [--debug] [--force]
+#   pix_refresh_library --moonlight [--debug] [--force]
+#   pix_refresh_library --iptv --radio   # multiple specific systems OK
+set -Eeuo pipefail
+
+WEBCMD="/usr/local/bin/indexers/pix_web_crawler"
+LOCALCMD="/usr/local/bin/indexers/pix_local_crawler"
+GLCMD="/usr/local/bin/indexers/pix_gamelist_compiler"
+
+DEBUG=0
+FORCE=0
+declare -a SELECTED=()
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [systems...] [--debug] [--force]
+
+Systems:
+  --all
+  --moonlight --iptv --radio --youtube
+  --services --music --videos --gallery
+
+Examples:
+  $(basename "$0") --all --debug
+  $(basename "$0") --youtube --music
+EOF
+}
+
+# -------- args --------
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --all|--moonlight|--iptv|--radio|--youtube|--services|--music|--videos|--gallery)
+      SELECTED+=("${1#--}") ;;
+    --debug) DEBUG=1 ;;
+    --force) FORCE=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown arg: $1" >&2; usage; exit 2 ;;
+  esac
+  shift
+done
+
+if ((${#SELECTED[@]}==0)); then
+  echo "No systems selected." >&2
+  usage
+  exit 2
+fi
+
+# passthrough flags
+declare -a PT=()
+((DEBUG==1)) && PT+=(--debug)
+((FORCE==1)) && PT+=(--force)
+
+ts(){ date "+%Y-%m-%d %H:%M:%S"; }
+log(){ echo "[$(ts)] $*"; }
+
+in_list(){ # sys list...
+  local s="$1"; shift
+  for x in "$@"; do [[ "$x" == "$s" ]] && return 0; done
+  return 1
+}
+
+run(){ # desc, command...
+  local desc="$1"; shift
+  log "$desc"
+  "$@" || log "WARN: step failed: $desc"
+}
+
+# sets
+WEB=(moonlight iptv radio youtube)
+LOCAL=(services music videos gallery)
+
+run_pair(){
+  local sys="$1"
+  if in_list "$sys" "${WEB[@]}"; then
+    run "crawl:web:$sys"   "$WEBCMD" "--$sys" "${PT[@]}"
+  elif in_list "$sys" "${LOCAL[@]}"; then
+    run "crawl:local:$sys" "$LOCALCMD" "--$sys" "${PT[@]}"
+  else
+    log "skip: unknown system '$sys'"
+    return
+  fi
+  run "gamelist:$sys" "$GLCMD" "--$sys" "${PT[@]}" --stamp /tmp/pix_es_needs_reload
+}
+
+# -------- plan + execute --------
+if in_list "all" "${SELECTED[@]}"; then
+  # exact order you requested
+  for s in moonlight iptv radio youtube; do
+    run "crawl:web:$s"   "$WEBCMD" "--$s" "${PT[@]}"
+  done
+  for s in services music videos gallery; do
+    run "crawl:local:$s" "$LOCALCMD" "--$s" "${PT[@]}"
+  done
+  for s in moonlight iptv radio youtube services music videos gallery; do
+    run "gamelist:$s" "$GLCMD" "--$s" "${PT[@]}"
+  done
+else
+  # selected systems only
+  for s in "${SELECTED[@]}"; do run_pair "$s"; done
+fi
+
+log "done."

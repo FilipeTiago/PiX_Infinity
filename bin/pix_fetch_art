@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# pix_fetch_art "<query>" <system>
+set -e
+q="$1"; sys="$2"
+out_dir="$(pix_media_path "$sys")"
+safe="${q//\//_}"
+out="$out_dir/${safe}.png"
+if [[ -s "$out" ]]; then echo "$out"; exit 0; fi
+if pix_icon_fetch "$q" "$out"; then echo "$out"; exit 0; fi
+# fallback per-system
+case "$sys" in
+  music)    pix_icon_fetch "album cover icon" "$out" || true ;;
+  videos)   pix_icon_fetch "movie clapper icon" "$out" || true ;;
+  gallery)  pix_icon_fetch "photo gallery icon" "$out" || true ;;
+  iptv)     pix_icon_fetch "tv logo icon" "$out" || true ;;
+  radio)    pix_icon_fetch "radio station icon" "$out" || true ;;
+  moonlight) pix_icon_fetch "pc game icon" "$out" || true ;;
+  youtube)  pix_icon_fetch "YouTube channel avatar" "$out" || true ;;
+esac
+echo "$out"
