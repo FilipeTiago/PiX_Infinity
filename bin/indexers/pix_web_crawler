@@ -423,11 +423,20 @@ crawl_moonlight(){
   local raw; raw="$(moonlight list "$host" 2>/dev/null || true)"
   [[ -z "$raw" ]] && { log "moonlight: no apps listed from $host"; return 0; }
 
+  # helper: underscored, sanitized slug
+  slug_uscore(){
+    # collapse spaces -> underscores; keep A–Z a–z 0–9 . _ -
+    printf '%s' "$1" \
+      | tr -s ' ' '_' \
+      | sed 's/[^A-Za-z0-9._-]/_/g'
+  }
+
   # lines like: "1. Steam Big Picture"
   sed -n 's/^[[:space:]]*[0-9]\+\.[[:space:]]*//p' <<<"$raw" | while IFS= read -r appname; do
     [[ -z "$appname" ]] && continue
-    local sname; sname="$(safe "$appname")"
+    local sname; sname="$(slug_uscore "$appname")"     # << no spaces in filename
     local rom="$rombase/$sname.moon"
+
     if [[ ! -e "$rom" || $FORCE -eq 1 ]]; then
       cat > "$rom.tmp" <<EOF
 host=${host}
@@ -447,20 +456,10 @@ EOF
     # ----- artwork -----
     local img="$imgbase/$sname.png"
     local q="$appname"
-    # friendlier query for Steam Big Picture, etc.
-    if [[ "${q,,}" =~ steam.*big.*picture ]]; then
-      q="Steam logo"
-    fi
+    if [[ "${q,,}" =~ steam.*big.*picture ]]; then q="Steam logo"; fi
 
     fetch_image game "$q" "$img"
-
-    # if fetch failed to produce a file, place a transparent placeholder
-    if [[ ! -s "$img" ]]; then
-      dbg "moonlight: no art for '$appname' -> placeholder"
-      blank_png "$img"
-    fi
-
-    # clean any stray temp files the fetcher may have left
+    [[ ! -s "$img" ]] && { dbg "moonlight: no art for '$appname' -> placeholder"; blank_png "$img"; }
     [[ -e "$imgbase/$sname.tmp.png" ]] && rm -f "$imgbase/$sname.tmp.png"
     [[ -e "$img.tmp" ]] && rm -f "$img.tmp"
   done

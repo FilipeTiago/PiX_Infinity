@@ -1,46 +1,122 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CFG="${1:-}"
-[ -n "${CFG}" ] && [ -f "${CFG}" ] || { echo "No .moon file"; exit 2; }
 LOG="/tmp/moonlight-$(whoami).log"
+
+# ------- helpers -------
+strip_quotes() {
+  local s="$1"
+  # remove one pair of leading/trailing quotes if present
+  s="${s%\"}"; s="${s#\"}"
+  s="${s%\'}"; s="${s#\'}"
+  printf '%s' "$s"
+}
+unescape_backslashes() {
+  # turn '\ ' -> ' ', '\(' -> '(', '\)' -> ')', '\"' -> '"', "\'" -> "'",
+  # and collapse '\\' -> '\'
+  sed -e 's/\\ / /g' \
+      -e 's/\\(/(/g' \
+      -e 's/\\)/)/g' \
+      -e 's/\\"/"/g' \
+      -e "s/\\'/'/g" \
+      -e 's/\\\\/\\/g'
+}
+expand_tilde() {
+  local p="$1"
+  printf '%s' "${p/#\~/$HOME}"
+}
+
+resolve_cfg_path() {
+  # Try a bunch of reasonable interpretations until one exists
+  local -a args
+  args=("$@")
+
+  local raw_last="${args[$((${#args[@]}-1))]}"
+  local raw_joined="$*"
+
+  # candidate builder
+  _cands=()
+
+  # 1) last arg as-is
+  _cands+=("$raw_last")
+  # 2) strip quotes
+  _cands+=("$(strip_quotes "$raw_last")")
+  # 3) unescape backslashes (spaces, parens, quotes)
+  _cands+=("$(strip_quotes "$raw_last" | unescape_backslashes)")
+  # 4) printf %b for generic escapes
+  _cands+=("$(printf '%b' "$(strip_quotes "$raw_last")")")
+
+  # 5) all args joined (in case it was split)
+  _cands+=("$raw_joined")
+  _cands+=("$(strip_quotes "$raw_joined")")
+  _cands+=("$(strip_quotes "$raw_joined" | unescape_backslashes)")
+  _cands+=("$(printf '%b' "$(strip_quotes "$raw_joined")")")
+
+  local c
+  for c in "${_cands[@]}"; do
+    [[ -z "$c" ]] && continue
+    c="$(expand_tilde "$c")"
+    if [[ -f "$c" ]]; then
+      printf '%s' "$c"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# ------- main -------
+if [[ $# -lt 1 ]]; then
+  echo "No .moon file" >&2
+  exit 2
+fi
+
+if ! CFG="$(resolve_cfg_path "$@")"; then
+  {
+    echo "===== $(date) ====="
+    echo "[pix_moon_run] ERROR: .moon not found"
+    echo "[pix_moon_run] args ($#): $*"
+  } | tee -a "$LOG" >&2
+  exit 2
+fi
 
 # Defaults
 HOST=""; APP=""
 RES_FLAG=""; FPS="60"; CODEC="h264"; BITRATE="20000"
 AUDIODEV="${AUDIODEV:-default}"
 
-# Parse .moon (key=value, simple)
+# Parse .moon (key=value)
 while IFS='=' read -r k v; do
+  k="${k%$'\r'}"; v="${v%$'\r'}"
+  [[ -z "${k:-}" || "$k" == \#* ]] && continue
   case "$k" in
     host)   HOST="$v" ;;
     app)    APP="$v" ;;
     res)
       case "$v" in
-        720|-720)   RES_FLAG="-720"  ;;
-        1080|-1080) RES_FLAG="-1080" ;;
-        2160|4k|-4k)RES_FLAG="-4k"   ;;
-        *)          RES_FLAG=""      ;;
+        720|-720)    RES_FLAG="-720" ;;
+        1080|-1080)  RES_FLAG="-1080" ;;
+        2160|4k|-4k) RES_FLAG="-4k" ;;
+        *)           RES_FLAG="" ;;
       esac
       ;;
-    fps)    FPS="$v" ;;
-    codec)  CODEC="$v" ;;
-    bitrate)BITRATE="$v" ;;
-    audio)  AUDIODEV="${v#alsa:}" ;;  # allow audio=alsa:sysdefault:CARD=vc4hdmi0
+    fps)     FPS="$v" ;;
+    codec)   CODEC="$v" ;;
+    bitrate) BITRATE="$v" ;;
+    audio)   AUDIODEV="${v#alsa:}" ;;
   esac
-done < <(grep -E '^(host|app|res|fps|codec|bitrate|audio)=' "$CFG" || true)
+done < <(grep -E '^(host|app|res|fps|codec|bitrate|audio)=' -- "$CFG" || true)
 
-[ -n "$HOST" ] && [ -n "$APP" ] || { echo "Missing host/app in $CFG"; exit 3; }
+if [[ -z "$HOST" || -z "$APP" ]]; then
+  echo "[pix_moon_run] Missing host/app in $CFG" | tee -a "$LOG" >&2
+  exit 3
+fi
 
-# Environment for KMS + ALSA (don’t touch system audio setup)
+# Environment for KMS + ALSA
 export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-kmsdrm}"
 export SDL_AUDIODRIVER="${SDL_AUDIODRIVER:-alsa}"
 export AUDIODEV
-
-# Make sure we have a user runtime (needed if ES didn’t set it)
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
-# Run
 {
   echo "===== $(date) ====="
   echo "cfg=$CFG"

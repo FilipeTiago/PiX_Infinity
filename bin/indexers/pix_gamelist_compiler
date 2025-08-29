@@ -123,7 +123,7 @@ compile_one(){
       rel="$(rel_path "$rdir" "$f")"
       name="$(basename "$f")"
       name_disp="${name%.*}"   # drop last extension if present
-
+      name_disp="${name_disp//_/ }"
       # image selection
       if img="$(pick_image_for_file "$sys" "$rdir" "$idir" "$f")"; then
         printf '  <game>\n    <path>%s</path>\n    <name>%s</name>\n    <image>%s</image>\n  </game>\n' \
