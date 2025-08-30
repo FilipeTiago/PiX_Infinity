@@ -51,10 +51,14 @@ rel_slug(){ # turn a path relative to romdir into a safe slug for filenames
 placeholder_png(){ # <out> [WxH]
   local out="$1" size="${2:-800x600}"
   local W="${size%x*}"; local H="${size#*x}"
+  local dir; dir="$(dirname "$out")"; mkdir -p "$dir"
+  local tmp; tmp="$(mktemp -p "$dir" --suffix=.tmp.png)"
+
   if have convert; then
-    convert -size "${W}x${H}" canvas:none "$out.tmp" && mv "$out.tmp" "$out"
+    # IM6-compatible transparent canvas; write as real PNG
+    convert -size "${W}x${H}" xc:none "$tmp" && mv -f "$tmp" "$out"
   else
-    # 1x1 transparent PNG minimal fallback
+    # 1x1 transparent PNG fallback
     printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc``\x00\x00\x00\x02\x00\x01\xe2!\xbc3\x00\x00\x00\x00IEND\xaeB`\x82' > "$out"
   fi
 }
@@ -198,7 +202,11 @@ make_collage(){
     convert "$src" -auto-orient -resize 400x300\> -gravity center -background none -extent 400x300 "$t"
     tiles+=("$t")
   done
-  montage "${tiles[@]}" -tile 2x2 -geometry +0+0 -background none "$out.tmp" || true
+  
+  local tmp; tmp="$(mktemp -p "$(dirname "$out")" --suffix=.tmp.png)"
+  montage "${tiles[@]}" -tile 2x2 -geometry +0+0 -background none "$tmp" || true
+  [[ -s "$tmp" ]] && mv -f "$tmp" "$out" || placeholder_png "$out"
+
   rm -f "${tiles[@]}"
   if [[ -s "$out.tmp" ]]; then
     mv "$out.tmp" "$out"
