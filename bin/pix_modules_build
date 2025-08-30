@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # Rebuild ~/.emulationstation/es_systems.cfg from ~/.emulationstation/modules/*.xml
-# - Resolves [ROM-FOLDER] using ~/.emulationstation/rom-location.txt (first existing)
-# - Skips systems that still contain [ROM-FOLDER] after resolution
-# - Always rewrites es_systems.cfg from scratch (backup kept)
+# Per-system ROM location resolution:
+# - rom-location.txt can contain:
+#     * base dirs (one per line) → priority order
+#     * per-system overrides: <system>=/absolute/path
+# - For <path>[ROM-FOLDER]/suffix</path>:
+#     1) If override for <system> exists → use it as the full path
+#     2) Else pick the first base where base+suffix exists
+#     3) Else use the first base (or ~/RetroPie/roms fallback)
 
 set -Eeuo pipefail
 
@@ -17,31 +22,113 @@ need(){ command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"; }
 
 need awk
 [ -d "$MOD_DIR" ] || die "modules dir not found: $MOD_DIR"
+mkdir -p "$ES_DIR"
 
-# Determine ROM base from rom-location.txt (first existing dir)
-ROM_BASE=""
-if [ -f "$ROM_LOC_FILE" ]; then
-  while IFS= read -r line; do
-    # trim
-    base="$(printf '%s' "$line" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
-    [ -z "$base" ] && continue
-    # expand ~
-    case "$base" in "~/"*) base="$USER_HOME/${base#~/}";; "~") base="$USER_HOME";; esac
-    if [ -d "$base" ]; then ROM_BASE="$base"; break; fi
+# --- read rom-location.txt ---
+BASES=()             # priority-ordered bases (no '=')
+OVR_KEYS=()          # per-system keys (name)
+OVR_PATHS=()         # per-system paths (absolute)
+
+if [[ -f "$ROM_LOC_FILE" ]]; then
+  while IFS= read -r raw; do
+    # strip comments and trim
+    line="${raw%%#*}"
+    line="$(printf '%s' "$line" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
+    [[ -z "$line" ]] && continue
+
+    if [[ "$line" == *=* ]]; then
+      key="${line%%=*}"
+      val="${line#*=}"
+      key="$(printf '%s' "$key" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
+      val="$(printf '%s' "$val" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
+      # expand leading ~
+      case "$val" in "~/"*) val="$USER_HOME/${val#~/}";; "~") val="$USER_HOME";; esac
+      OVR_KEYS+=("$key")
+      OVR_PATHS+=("$val")
+    else
+      base="$line"
+      case "$base" in "~/"*) base="$USER_HOME/${base#~/}";; "~") base="$USER_HOME";; esac
+      BASES+=("$base")
+    fi
   done < "$ROM_LOC_FILE"
 fi
-# Fallback: ~/RetroPie/roms if present
-if [ -z "$ROM_BASE" ] && [ -d "$USER_HOME/RetroPie/roms" ]; then
-  ROM_BASE="$USER_HOME/RetroPie/roms"
+
+# Fallback bases if none were provided
+if [[ ${#BASES[@]} -eq 0 ]]; then
+  if [[ -d "$USER_HOME/RetroPie/roms" ]]; then
+    BASES+=("$USER_HOME/RetroPie/roms")
+  fi
 fi
 
-[ -z "$ROM_BASE" ] && echo "[pix-mod] WARN: no ROM base found; modules requiring [ROM-FOLDER] will be skipped."
+if [[ ${#BASES[@]} -eq 0 ]]; then
+  echo "[pix-mod] WARN: no base dirs configured; modules that use [ROM-FOLDER] may not resolve."
+fi
+
+# --- helpers ---
+# lookup per-system override path; echo path or empty
+lookup_override() {
+  local sys="$1"
+  local i
+  for ((i=0; i<${#OVR_KEYS[@]}; i++)); do
+    if [[ "${OVR_KEYS[i]}" == "$sys" ]]; then
+      echo "${OVR_PATHS[i]}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# extract first <name>value</name>
+extract_sysname() {
+  awk -F'[<>]' '/<name>/{print $3; exit}' <<<"$1"
+}
+
+# extract first <path>value</path>
+extract_path() {
+  awk -F'[<>]' '/<path>/{print $3; exit}' <<<"$1"
+}
+
+# replace first <path>...</path> with provided absolute path
+replace_path() {
+  local xml="$1" new="$2"
+  # escape for sed replacement
+  local esc
+  esc="$(printf '%s' "$new" | sed -e 's/[\\/&]/\\&/g')"
+  sed -E "0,/<path>[^<]*<\/path>/{s@(<path>)[^<]*(</path>)@\\1${esc}\\2@}" <<<"$xml"
+}
+
+# decide resolved path for a module’s path template
+resolve_path() {
+  local sys="$1" path_tpl="$2"
+  local override; override="$(lookup_override "$sys" || true)"
+  if [[ -n "$override" ]]; then
+    printf '%s' "$override"
+    return 0
+  fi
+
+  # If it contains [ROM-FOLDER], try suffix on each base
+  if grep -q '\[ROM-FOLDER\]' <<<"$path_tpl"; then
+    # suffix after first [ROM-FOLDER]
+    local suffix
+    suffix="$(awk 'match($0,/\[ROM-FOLDER\]/){print substr($0,RSTART+RLENGTH); exit}' <<<"$path_tpl")"
+    local b
+    for b in "${BASES[@]}"; do
+      [[ -d "${b}${suffix}" ]] && { printf '%s' "${b}${suffix}"; return 0; }
+    done
+    # none exists: fall back to first base (if any)
+    if [[ ${#BASES[@]} -gt 0 ]]; then
+      printf '%s' "${BASES[0]}${suffix}"
+      return 0
+    fi
+  fi
+
+  # No placeholder or no bases: return original template
+  printf '%s' "$path_tpl"
+}
 
 TMP="$(mktemp)"
 BK="$ES_CFG.bak.$(date +%s)"
-mkdir -p "$ES_DIR"
 
-# Begin file
 {
   echo '<?xml version="1.0"?>'
   echo '<systemList>'
@@ -50,52 +137,42 @@ mkdir -p "$ES_DIR"
 added=0
 skipped=0
 
-# Process each module xml (sorted)
+# process modules in stable order
 while IFS= read -r -d '' f; do
-  name="$(basename "$f")"
-
-  # Read content
   content="$(cat "$f")"
+  sysname="$(extract_sysname "$content")"
+  [[ -z "$sysname" ]] && { echo "[pix-mod] skip: $(basename "$f") (no <name>)"; skipped=$((skipped+1)); continue; }
 
-  # Resolve [ROM-FOLDER] if present
-  if printf '%s' "$content" | grep -q '\[ROM-FOLDER\]'; then
-    if [ -n "$ROM_BASE" ]; then
-      content="${content//\[ROM-FOLDER\]/$ROM_BASE}"
-    else
-      echo "[pix-mod] skip: $name (no ROM_BASE for [ROM-FOLDER])"
-      skipped=$((skipped+1))
-      continue
-    fi
-  fi
-
-  # If still contains placeholder, skip to avoid breaking ES
-  if printf '%s' "$content" | grep -q '\[ROM-FOLDER\]'; then
-    echo "[pix-mod] skip: $name (unresolved [ROM-FOLDER])"
+  path_tpl="$(extract_path "$content")"
+  if [[ -z "$path_tpl" ]]; then
+    echo "[pix-mod] skip: $sysname (no <path>)"
     skipped=$((skipped+1))
     continue
   fi
 
-  # Optionally sanity-check that it contains a <system> block
-  if ! printf '%s' "$content" | grep -q '<system>'; then
-    echo "[pix-mod] skip: $name (no <system> tag)"
+  new_path="$(resolve_path "$sysname" "$path_tpl")"
+  new_xml="$(replace_path "$content" "$new_path")"
+
+  # sanity: still contains unresolved [ROM-FOLDER]?
+  if grep -q '\[ROM-FOLDER\]' <<<"$new_xml"; then
+    echo "[pix-mod] skip: $sysname (unresolved [ROM-FOLDER])"
     skipped=$((skipped+1))
     continue
   fi
 
-  # Append with a blank line separator
-  echo "$content" >> "$TMP"
+  echo "$new_xml" >> "$TMP"
   echo >> "$TMP"
   added=$((added+1))
-  # Show a compact summary line
-  sysname="$(printf '%s' "$content" | awk -F'[<>]' '/<name>/{print $3; exit}')"
-  echo "[pix-mod] + $sysname  ←  $name"
+  echo "[pix-mod] + $sysname  →  $new_path"
 done < <(find "$MOD_DIR" -maxdepth 1 -type f -name '*.xml' -print0 | sort -z)
 
-# Close file
 echo '</systemList>' >> "$TMP"
 
-# Backup & swap
-if [ -f "$ES_CFG" ]; then cp -f "$ES_CFG" "$BK"; echo "[pix-mod] backup: $BK"; fi
+# backup & swap
+if [[ -f "$ES_CFG" ]]; then
+  cp -f "$ES_CFG" "$BK"
+  echo "[pix-mod] backup: $BK"
+fi
 mv -f "$TMP" "$ES_CFG"
 chmod 644 "$ES_CFG"
 

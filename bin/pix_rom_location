@@ -2,89 +2,76 @@
 # Print the ROM path for a given EmulationStation system name.
 # Usage:
 #   pix_rom_location <system-name> [--images]
-# Examples:
-#   pix_rom_location youtube
-#   pix_rom_location youtube --images   -> /.../downloaded_images/youtube
-#
-# Logic for --images:
-#   If the ROM path looks like ".../roms/<system>", the images path becomes
-#   the parent of "roms" plus "downloaded_images/<system>".
-#   e.g. /home/user/RetroPie/roms/youtube -> /home/user/RetroPie/downloaded_images/youtube
-#   Otherwise, we fall back to ~/.emulationstation/downloaded_images/<system>.
-#
 set -euo pipefail
 
 CFG="${ES_CFG:-$HOME/.emulationstation/es_systems.cfg}"
-MODE="roms"   # or "images"
+MODE="roms"
 
-print_usage() {
-  echo "usage: $(basename "$0") <system-name> [--images]" >&2
-  exit 2
-}
+usage(){ echo "usage: $(basename "$0") <system-name> [--images]" >&2; exit 2; }
 
-[[ $# -lt 1 || $# -gt 2 ]] && print_usage
-
+[[ $# -lt 1 || $# -gt 2 ]] && usage
 SYS="$1"
-if [[ "${2-}" == "--images" ]]; then
-  MODE="images"
-elif [[ $# -eq 2 ]]; then
-  print_usage
-fi
+[[ "${2-}" == "--images" ]] && MODE="images"
+[[ $# -eq 2 && "$MODE" != "images" ]] && usage
 
-if [[ ! -f "$CFG" ]]; then
-  echo "error: config not found: $CFG" >&2
-  exit 3
-fi
+[[ -f "$CFG" ]] || { echo "error: config not found: $CFG" >&2; exit 3; }
 
-# Extract <path> for the given <name> from es_systems.cfg (very lenient XML scan)
+# Extract ROM path for system
 rom_path="$(
   awk -v sys="$SYS" '
-    BEGIN { inblk=0; hit=0 }
-    /<system[> ]/ { inblk=1; hit=0; next }
-    /<\/system>/   { inblk=0; hit=0; next }
-
+    BEGIN{inblk=0;hit=0}
+    /<system[> ]/ {inblk=1;hit=0;next}
+    /<\/system>/  {inblk=0;hit=0;next}
     inblk && /<name>/ {
-      name = $0
-      sub(/^.*<name>[[:space:]]*/, "", name)
-      sub(/[[:space:]]*<\/name>.*$/, "", name)
-      if (name == sys) hit=1
-      next
+      n=$0; sub(/^.*<name>[[:space:]]*/,"",n); sub(/[[:space:]]*<\/name>.*$/,"",n)
+      if(n==sys) hit=1; next
     }
-
     inblk && hit && /<path>/ {
-      p = $0
-      sub(/^.*<path>[[:space:]]*/, "", p)
-      sub(/[[:space:]]*<\/path>.*$/, "", p)
-      print p
-      exit
-    }
-  ' "$CFG"
+      p=$0; sub(/^.*<path>[[:space:]]*/,"",p); sub(/[[:space:]]*<\/path>.*$/,"",p)
+      print p; exit
+    }' "$CFG"
 )"
+[[ -n "${rom_path:-}" ]] || { echo "error: system '$SYS' not found or missing <path> in $CFG" >&2; exit 4; }
 
-if [[ -z "${rom_path:-}" ]]; then
-  echo "error: system '$SYS' not found or missing <path> in $CFG" >&2
-  exit 4
-fi
-
-# Normalize/expand: trim spaces, expand leading ~
+# Trim + expand ~
 rom_path="$(printf '%s' "$rom_path" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
 rom_path="${rom_path/#\~/$HOME}"
 
+# Normalize if we can (handles spaces safely)
+abs_rom="$rom_path"
+if command -v realpath >/dev/null 2>&1; then
+  abs_rom="$(realpath -m -- "$rom_path" 2>/dev/null || echo "$rom_path")"
+fi
+
 if [[ "$MODE" == "roms" ]]; then
-  echo "$rom_path"
+  echo "$abs_rom"
   exit 0
 fi
 
 # MODE=images
-# If rom_path contains /roms/<something>, base is the parent of "roms".
-# Else fall back to ~/.emulationstation/downloaded_images.
-if [[ "$rom_path" =~ /roms(/|$) ]]; then
-  # Strip /roms and everything after it to get the base
-  base="$(sed -E 's#/roms(/.*)?$##' <<<"$rom_path")"
-  images_path="$base/downloaded_images/$SYS"
+# Primary: parent-of-"roms" if present
+if [[ "$abs_rom" =~ /roms(/|$) ]]; then
+  base="$(sed -E 's#/roms(/.*)?$##' <<<"$abs_rom")"
+  candidate="$base/downloaded_images/$SYS"
 else
-  images_path="$HOME/.emulationstation/downloaded_images/$SYS"
+  # Generic: grandparent of the ROM directory
+  #   e.g. /mnt/Nas/Infinity/videos -> /mnt/Nas/downloaded_images/videos
+  #        /home/u/RetroPie/roms/services -> /home/u/RetroPie/downloaded_images/services
+  parent="$(dirname -- "$abs_rom")"
+  grandparent="$(dirname -- "$parent")"
+  # guard against reaching '/'
+  if [[ -z "$grandparent" || "$grandparent" == "/" ]]; then
+    candidate="$HOME/.emulationstation/downloaded_images/$SYS"
+  else
+    candidate="$grandparent/downloaded_images/$SYS"
+  fi
 fi
 
-echo "$images_path"
-exit 0
+# Fallback if not writable
+fallback="${PIX_IMAGES_ROOT:-$HOME/RetroPie/downloaded_images}/$SYS"
+if mkdir -p -- "$candidate" 2>/dev/null && [[ -w "$candidate" ]]; then
+  echo "$candidate"
+else
+  mkdir -p -- "$fallback" >/dev/null 2>&1 || true
+  echo "$fallback"
+fi
