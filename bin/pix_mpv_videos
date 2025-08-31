@@ -49,6 +49,11 @@ SOCK="/tmp/mpv-videos-$$.sock"
 RUNLOG="/tmp/pix_mpv.$$.log"
 VT="$(fgconsole 2>/dev/null || echo 8)"
 
+# NEW: export the values used by the client script
+export SOCK
+export idx
+export m3u
+
 {
   echo "[videos] dir=$dir"
   echo "[videos] sel=$sel idx=$idx m3u=$m3u sock=$SOCK"
@@ -58,28 +63,90 @@ VT="$(fgconsole 2>/dev/null || echo 8)"
 CLIENT="$(mktemp /tmp/pix_mpv_client.XXXXXX.sh)"
 trap 'rm -f "$CLIENT" "$m3u"' EXIT
 
-cat >"$CLIENT" <<CL
+
+# create a temp Lua script that auto-selects subs
+# ---- Lua: pick "Full/Dialog" over "Signs/Songs" and override bad picks ----
+LUA="$(mktemp /tmp/mpv_auto_sub.XXXXXX.lua)"; export LUA
+cat >"$LUA" <<'LUA'
+local lang_prio = {"eng","en","por","pt","pt-br"}
+local prefer = {"full","dialog","dialogue","sdh","cc"}
+local avoid  = {"sign","song","karaoke","forced"}
+local function lower(s) return (s or ""):lower() end
+local function has_any(hay, words)
+  hay = lower(hay)
+  for _,w in ipairs(words) do if hay:find(w, 1, true) then return true end end
+  return false
+end
+local function score(t)
+  if t.type ~= "sub" then return -1e9 end
+  local s = 0
+  if has_any(t.title, prefer) then s = s + 20 end
+  if has_any(t.title, avoid)  then s = s - 15 end
+  if t["default"] then s = s + 2 end
+  -- language priority (earlier = better)
+  local lang = lower(t.lang)
+  for i,lp in ipairs(lang_prio) do
+    if lang == lp or has_any(t.title, {lp}) then s = s + (100 - i) break end
+  end
+  return s
+end
+local function tid(list, id)
+  for _,t in ipairs(list or {}) do if t.id == id then return t end end
+end
+local function best_sub(list)
+  local b, bs = nil, -1e9
+  for _,t in ipairs(list or {}) do
+    local sc = score(t)
+    if sc > bs then bs, b = sc, t end
+  end
+  return b, bs
+end
+mp.observe_property("track-list", "native", function(_, list)
+  local cur_id = mp.get_property_native("sid")
+  if cur_id == "no" then cur_id = nil end
+  local cur = cur_id and tid(list, cur_id) or nil
+  local cur_score = cur and score(cur) or -1e9
+  local b, bs = best_sub(list)
+  if b and (not cur or bs > cur_score) then
+    mp.set_property_native("sid", b.id)
+    mp.set_property("sub-visibility", "yes")
+    mp.msg.info(("Auto-sub: sid=%s lang=%s title=%s"):format(tostring(b.id), tostring(b.lang), tostring(b.title)))
+  end
+end)
+LUA
+
+
+cat >"$CLIENT" <<'CL'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 export DISPLAY=":2"
 
+: "${SOCK:?missing SOCK}"
+: "${idx:?missing idx}"
+: "${m3u:?missing m3u}"
+: "${LUA:?missing LUA}"
+
 # --- AUDIO ENV (Pulse/PipeWire) ---
-USR_UID="\$(id -u)"
-export XDG_RUNTIME_DIR="\${XDG_RUNTIME_DIR:-/run/user/\$USR_UID}"
-if [ -S "\$XDG_RUNTIME_DIR/pulse/native" ]; then
-  export PULSE_SERVER="unix:\$XDG_RUNTIME_DIR/pulse/native"
+USR_UID="$(id -u)"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$USR_UID}"
+if [ -S "$XDG_RUNTIME_DIR/pulse/native" ]; then
+  export PULSE_SERVER="unix:$XDG_RUNTIME_DIR/pulse/native"
 fi
 export JACK_NO_START_SERVER=1
 
-# Start pad helper (talks to mpv via IPC, maintains 00_continue.mp4)
-/usr/local/bin/pix_padmap_mpvvideos "$SOCK" >/tmp/pix_padmap_mpv.\$\$.log 2>&1 &
+# Pad helper (keep yours if needed)
+(/usr/local/bin/pix_padmap_mpvvideos "$SOCK" >/tmp/pix_padmap_mpv.$$.log 2>&1) &
 
-# Run mpv
+# Run mpv with the Lua script and sane defaults
 exec /usr/bin/mpv --ao=pulse --fs --no-terminal --input-conf=/dev/null \
   --input-ipc-server="$SOCK" --idle=no --keep-open=no --force-window=yes \
   --save-position-on-quit=yes --resume-playback=yes \
-  --osd-level=1 --loop-playlist=no --playlist-start=$idx --playlist="$m3u"
+  --osd-level=1 --loop-playlist=no --playlist-start="$idx" --playlist="$m3u" \
+  --sub-visibility=yes --slang=eng,en,por,pt,pt-BR --no-sub-forced-only \
+  --hwdec=auto-safe \
+  --script="$LUA"
 CL
+
 chmod +x "$CLIENT"
 
 # Start a fresh X on :2 (avoids collisions with Gallery's :1)
