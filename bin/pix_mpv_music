@@ -133,8 +133,8 @@ export JACK_NO_START_SERVER=1
 FEHPID=$!
 
 # Pad + watcher
-/usr/local/bin/pix_padmap_mpv_music "$SOCK" >/tmp/pix_padmap_mpv_music.$$.log 2>&1 &  PADPID=$!
-/usr/local/bin/pix_mpv_music_watch "$SOCK" "$WALL" "$ROMROOT" "$GMXML" >/tmp/pix_mpv_music_watch.$$.log 2>&1 &  WATPID=$!
+/usr/local/bin/pix_pad --profile music -- "$SOCK" >/tmp/pix_padmap_mpv_music.$$.log 2>&1 &  PADPID=$!
+/usr/local/bin/mpvscripts/pix_mpv_music_watch "$SOCK" "$WALL" "$ROMROOT" "$GMXML" >/tmp/pix_mpv_music_watch.$$.log 2>&1 &  WATPID=$!
 
 # Optional mpv log when debugging
 MPVLOG=""

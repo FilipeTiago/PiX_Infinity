@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# pix_pad — dispatch to a per-profile pad mapper with config layering
+# Usage examples:
+#   pix_pad --profile mpv -- /tmp/mpv.sock
+#   pix_pad -p chrome --
+#   pix_pad --list
+
+set -Eeuo pipefail
+
+PROFILE=""
+LIST=0
+DEBUG="${DEBUG:-0}"
+
+PADS_DIR="${PIX_PADS_DIR:-/usr/local/bin/pads}"
+CONF_DIR="${PIX_PAD_CONF:-$HOME/.config/pix/pads}"
+
+usage() {
+  cat >&2 <<EOF
+Usage: $(basename "$0") --profile <name> [--debug] [--] [args...]
+       $(basename "$0") --list
+Env:
+  PIX_PADS_DIR (default: $PADS_DIR)
+  PIX_PAD_CONF (default: $CONF_DIR)
+EOF
+  exit 2
+}
+
+die(){ echo "[pix_pad] $*" >&2; exit 1; }
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -p|--profile) PROFILE="${2-}"; shift ;;
+    --list) LIST=1 ;;
+    --debug) DEBUG=1 ;;
+    --) shift; break ;;
+    -h|--help) usage ;;
+    *) break ;;
+  esac
+  shift
+done
+
+if (( LIST )); then
+  shopt -s nullglob
+  for f in "$PADS_DIR"/pix_pad_*.sh; do
+    b="${f##*/}"; echo "${b#pix_pad_%.sh}"
+  done | sed -E 's/^pix_pad_([^.]*)\.sh/\1/' | sort -u
+  exit 0
+fi
+
+[[ -n "$PROFILE" ]] || usage
+
+script="$PADS_DIR/pix_pad_${PROFILE}"
+[[ -x "$script" ]] || die "profile not installed: $script"
+
+# Config layering: global then per-profile
+mkdir -p "$CONF_DIR"
+[[ -r "$CONF_DIR/pads.conf" ]] && # shellcheck disable=SC1090
+  source "$CONF_DIR/pads.conf"
+[[ -r "$CONF_DIR/${PROFILE}.conf" ]] && # shellcheck disable=SC1090
+  source "$CONF_DIR/${PROFILE}.conf"
+
+export DEBUG PIX_PAD_PROFILE="$PROFILE" PIX_PADS_DIR="$PADS_DIR" PIX_PAD_CONF="$CONF_DIR"
+
+# Hand off (so signals/exit propagate nicely)
+exec "$script" "$@"

@@ -101,7 +101,7 @@ export JACK_NO_START_SERVER=1
 FEHPID=\$!
 
 # Gamepad (A=quit)
-/usr/local/bin/pix_padmap_mpv_music "\$SOCK" >/tmp/pix_padmap_mpv_radio.\$\$.log 2>&1 &
+/usr/local/bin/pix_pad --profile music -- "\$SOCK" >/tmp/pix_padmap_mpv_radio.\$\$.log 2>&1 &
 PADPID=\$!
 
 # Play stream

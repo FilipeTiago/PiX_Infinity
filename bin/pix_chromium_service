@@ -98,7 +98,7 @@ fi
 
 # Gamepad mapper (not in screensaver)
 if [ "${PIX_SAVER:-0}" != "1" ]; then
-  /usr/local/bin/pix_padmap_chromium_xtest >/tmp/pix_padmap_chromium_xtest.$$.log 2>&1 &
+  /usr/local/bin/pix_pad --profile chrome -- >/tmp/pix_padmap_chromium_xtest.$$.log 2>&1 &
   PADPID=$!
 else
   PADPID=""

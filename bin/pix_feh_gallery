@@ -38,7 +38,7 @@ export DISPLAY=":1"
 echo "[client] who=\$(id -un) HOME=\$HOME DISPLAY=\$DISPLAY" >&2
 
 # start pad mapper in background
-/usr/local/bin/pix_padmap_feh >/tmp/pix_padmap.\$\$.log 2>&1 &
+/usr/local/bin/pix_pad --profile feh -- >/tmp/pix_padmap.\$\$.log 2>&1 &
 PADPID=\$!
 
 # run feh

@@ -139,6 +139,10 @@ while True:
             if e.type==ecodes.EV_KEY:
                 if e.code==ecodes.BTN_SOUTH and e.value==1:
                     mpv_send(sock, ["quit"])
+                elif e.code==ecodes.BTN_TL and e.value==1:
+                    mpv_send(sock, ["cycle", "sid"])
+                elif e.code==ecodes.BTN_TR and e.value==1:
+                    mpv_send(sock, ["cycle", "aid"])
                 elif e.code==ecodes.BTN_EAST and e.value==1:
                     mpv_send(sock, ["cycle", "pause"])
                 elif e.code in (ecodes.BTN_DPAD_LEFT, ecodes.BTN_DPAD_RIGHT,
