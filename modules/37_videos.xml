@@ -3,7 +3,7 @@
   <fullname>Videos</fullname>
   <path>[ROM-FOLDER]/videos</path>
   <extension>.mp4 .avi .mkv .MP4 .AVI .MKV</extension>
-  <command>/usr/local/bin/pix_vt_switch 8 /bin/bash -lc '/usr/local/bin/pix_mpv_videos "%ROM%"'</command>
+  <command>/usr/local/bin/pix_vt_switch 8 /bin/bash -lc '/usr/local/bin/pix_app --type videos %ROM%'</command>
   <platform>mpv</platform>
   <theme>videos</theme>
 </system>

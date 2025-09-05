@@ -123,7 +123,7 @@ def start_saver(url):
     env["PIX_DISPLAY"] = DISPLAY
     # Launch without VT
     return subprocess.Popen(
-        ["/usr/local/bin/pix_chromium_saver", url],
+        ["/usr/local/bin/apps/pix_chromium_saver", url],
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

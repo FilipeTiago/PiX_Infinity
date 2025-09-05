@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# pix_app — tiny router to launch PIX app helpers
+# Usage:
+#   pix_app --type <chrome|feh|moonlight|iptv|music|radio|videos> [args...]
+#
+# Notes:
+# - Everything after --type is passed through to the selected app script.
+# - App scripts live in /usr/local/bin/apps (override with $PIX_APPS_DIR).
+# - Optional: --debug to print what will be executed.
+
+set -Eeuo pipefail
+
+APPS_DIR="${PIX_APPS_DIR:-/usr/local/bin/apps}"
+TYPE=""
+DEBUG=0
+PASS_ARGS=()
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") --type <chrome|feh|moonlight|iptv|music|radio|videos> [args...]
+
+Routes to one of:
+  chrome    -> ${APPS_DIR}/pix_chromium_service
+  feh       -> ${APPS_DIR}/pix_feh_gallery
+  moonlight -> ${APPS_DIR}/pix_moon_run
+  iptv      -> ${APPS_DIR}/pix_mpv_iptv
+  music     -> ${APPS_DIR}/pix_mpv_music
+  radio     -> ${APPS_DIR}/pix_mpv_radio
+  videos    -> ${APPS_DIR}/pix_mpv_videos
+
+Env:
+  PIX_APPS_DIR  Override apps directory (default: ${APPS_DIR})
+
+Flags:
+  --debug   Verbose routing info
+  -h|--help Show this help
+
+Everything not parsed as a flag is passed to the target app unchanged.
+EOF
+}
+
+# ---- parse CLI ----
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --type)           TYPE="${2-}"; shift 2 ;;
+    --type=*)         TYPE="${1#--type=}"; shift ;;
+    -t)               TYPE="${2-}"; shift 2 ;;
+    --debug)          DEBUG=1; shift ;;
+    -h|--help)        usage; exit 0 ;;
+    --)               shift; PASS_ARGS+=("$@"); break ;;
+    *)                PASS_ARGS+=("$1"); shift ;;
+  esac
+done
+
+[[ -n "$TYPE" ]] || { echo "ERR: --type is required"; usage; exit 2; }
+
+# ---- map type -> script ----
+case "$TYPE" in
+  chrome)    TARGET="${APPS_DIR}/pix_chromium_service" ;;
+  feh)       TARGET="${APPS_DIR}/pix_feh_gallery" ;;
+  moonlight) TARGET="${APPS_DIR}/pix_moon_run" ;;
+  iptv)      TARGET="${APPS_DIR}/pix_mpv_iptv" ;;
+  music)     TARGET="${APPS_DIR}/pix_mpv_music" ;;
+  radio)     TARGET="${APPS_DIR}/pix_mpv_radio" ;;
+  videos)    TARGET="${APPS_DIR}/pix_mpv_videos" ;;
+  *) echo "ERR: unknown --type '$TYPE'"; usage; exit 3 ;;
+esac
+
+# ---- sanity ----
+if [[ ! -x "$TARGET" ]]; then
+  echo "ERR: target not found/executable: $TARGET" >&2
+  exit 4
+fi
+
+# ---- debug echo ----
+if [[ "$DEBUG" -eq 1 ]]; then
+  echo "[pix_app] type=$TYPE"
+  echo "[pix_app] target=$TARGET"
+  printf '[pix_app] argv:'; for a in "${PASS_ARGS[@]}"; do printf ' %q' "$a"; done; printf '\n'
+fi
+
+# ---- hand off ----
+exec "$TARGET" "${PASS_ARGS[@]}"

@@ -58,7 +58,7 @@ UA="${UA:-}"
 REF="${REF:-}"
 
 # Gamepad mapper (re-use music mapper: A=quit). Safe even if extra bindings exist.
- /usr/local/bin/pix_padmap_mpv_music "$SOCK" >/tmp/pix_padmap_mpv_iptv.$$.log 2>&1 &
+ /usr/local/bin/pix_pad --profile music -- "$SOCK" >/tmp/pix_padmap_mpv_iptv.$$.log 2>&1 &
 PADPID=$!
 
 # Assemble mpv opts: no user/system config; fullscreen; no terminal UI; IPC for pad

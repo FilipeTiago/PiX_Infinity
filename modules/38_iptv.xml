@@ -3,7 +3,7 @@
   <fullname>Iptv</fullname>
   <path>[ROM-FOLDER]/iptv</path>
   <extension>.m3u .M3U</extension>
-  <command>/usr/local/bin/pix_vt_switch 8 /bin/bash -lc '/usr/local/bin/pix_mpv_iptv "%ROM%"'</command>
+  <command>/usr/local/bin/pix_vt_switch 8 /bin/bash -lc '/usr/local/bin/pix_app --type iptv %ROM%'</command>
   <platform>web</platform>
   <theme>iptv</theme>
 </system>
